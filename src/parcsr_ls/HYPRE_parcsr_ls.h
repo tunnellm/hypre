@@ -160,8 +160,15 @@ HYPRE_Int HYPRE_BoomerAMGSetCumNnzAP(HYPRE_Solver  solver,
 
 /**
  * Returns the estimated number of FLOPs for the setup phase.
- * This is an approximate count based on matrix sizes, only valid after
- * successful completion of HYPRE_BoomerAMGSetup.
+ * FLOPs are accumulated during setup based on PyAMG complexity analysis.
+ * Only valid after successful completion of HYPRE_BoomerAMGSetup.
+ *
+ * Per-level setup cost formula:
+ *   - SOC (strength of connection): 2 * nnz(A)
+ *   - Coarsening: ~0 (graph operations only)
+ *   - Interpolation construction: 2 * nnz(A)
+ *   - RAP (Galerkin product): 2 * nnz(A) * nnz(P) / n
+ *
  * Counting convention: FMA assumed (multiply-add as single FLOP),
  * sparse matvec counted as nnz operations.
  **/

@@ -995,6 +995,9 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
     *  Enter Coarsening Loop
     *-----------------------------------------------------*/
 
+   /* Initialize setup FLOP counter - will be accumulated during setup */
+   hypre_ParAMGDataSetupFlops(amg_data) = 0.0;
+
    while (not_finished_coarsening)
    {
       /* only do nodal coarsening on a fixed number of levels */
@@ -1725,6 +1728,13 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   coarse_dof_func = NULL;
                }
 
+               /* Accumulate SOC FLOP cost before early exit (coarse_size == 0 or fine_size) */
+               if (!block_mode)
+               {
+                  HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
+                  hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A;
+               }
+
                HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
                break;
             }
@@ -1756,6 +1766,13 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   Sabs = NULL;
                }
 
+               /* Accumulate SOC FLOP cost before early exit (coarse_size < min_coarse_size) */
+               if (!block_mode)
+               {
+                  HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
+                  hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A;
+               }
+
                HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
                break;
             }
@@ -1765,6 +1782,16 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 
          /*****xxxxxxxxxxxxx changes for min_coarse_size  end */
          HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
+
+         /* Accumulate SOC (strength of connection) FLOP cost: 2 * nnz(A)
+          * Based on PyAMG complexity analysis: computing strong connections
+          * requires comparisons with row max values */
+         if (S != NULL && !block_mode)
+         {
+            HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
+            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A;
+         }
+
          HYPRE_ANNOTATE_REGION_BEGIN("%s", "Interpolation");
 
          if (level < agg_num_levels)
@@ -2488,6 +2515,15 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
             dof_func_array[level + 1] = coarse_dof_func;
          }
 
+         /* Accumulate interpolation construction FLOP cost
+          * Based on PyAMG: classical interp cost is nnz(A) + nnz(S) + nnz(S)^2*nnz(A)/n^2
+          * Simplified estimate: 2 * nnz(A) (captures iteration over A's strong connections) */
+         if (P != NULL && !block_mode)
+         {
+            HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
+            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A;
+         }
+
          HYPRE_ANNOTATE_REGION_END("%s", "Interpolation");
       } /* end of if max_levels > 1 */
 
@@ -2908,6 +2944,20 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                P_array[level] = Pnew;
                hypre_ParCSRMatrixDestroy(C);
             } /* if (ns == 1) */
+
+            /* Accumulate RAP FLOP cost for additive AMG path
+             * Based on PyAMG: RAP cost = 2 * nnz(A) * nnz(P) / n */
+            if (P_array[level] != NULL)
+            {
+               HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
+               HYPRE_Real nnz_P = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(P_array[level]);
+               HYPRE_BigInt n_rows = hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+               if (n_rows > 0)
+               {
+                  hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * nnz_P / (HYPRE_Real) n_rows;
+               }
+            }
+
             HYPRE_ANNOTATE_REGION_END("%s", "RAP");
 
             if (add_P_max_elmts || add_trunc_factor != 0.0)
@@ -3079,6 +3129,20 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       hypre_sprintf(file, "P_%02d.IJ.out", level);
       hypre_ParCSRMatrixPrintIJ(P_array[level], 0, 0, file);
 #endif
+
+      /* Accumulate RAP (Galerkin triple product) FLOP cost
+       * Based on PyAMG: RAP cost = 2 * nnz(A) * nnz(P) / n
+       * (R.nnz * A.nnz / n + A.nnz * P.nnz / n, and R = P^T so R.nnz = P.nnz) */
+      if (P_array[level] != NULL && !block_mode)
+      {
+         HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
+         HYPRE_Real nnz_P = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(P_array[level]);
+         HYPRE_BigInt n_rows = hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+         if (n_rows > 0)
+         {
+            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * nnz_P / (HYPRE_Real) n_rows;
+         }
+      }
 
       HYPRE_ANNOTATE_REGION_END("%s", "RAP");
       if (debug_flag == 1)
@@ -4027,23 +4091,21 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
    HYPRE_ANNOTATE_FUNC_END;
 
    /*-----------------------------------------------------------------------
-    * Compute FLOP estimates based on matrix sizes.
+    * Compute solve FLOP estimates based on matrix sizes.
+    * Setup FLOPs are accumulated during the setup process above.
     *
     * ASSUMPTIONS:
     *   - FMA (fused multiply-add) counted as single FLOP
     *   - Sparse matvec with matrix M costs nnz(M) FLOPs
     *   - Smoothing sweep costs nnz(A_lev) FLOPs per sweep
     *   - Symmetric smoothers (types 6, 8, 21, 88, 89) do 2 passes per sweep
-    *   - Setup costs are rough approximations; actual costs vary by
-    *     coarsening type, interpolation type, and strength threshold
     *
-    * SETUP COST PER LEVEL (lev < num_levels - 1):
-    *   Let A_lev = level matrix, P_lev = interpolation, A_{lev+1} = coarse matrix
-    *   - Strength computation:     ~nnz(A_lev)
-    *   - Coarsening:               included in above
-    *   - Interpolation construct:  ~nnz(P_lev)
-    *   - RAP (Galerkin product):   ~nnz(A_{lev+1})
-    *   - Total per level:          nnz(A_lev) + nnz(P_lev) + nnz(A_{lev+1})
+    * SETUP COSTS (accumulated during setup, based on PyAMG analysis):
+    *   Per level (lev < num_levels - 1):
+    *   - SOC (strength of connection): 2 * nnz(A_lev)
+    *   - Coarsening: ~0 (graph operations only)
+    *   - Interpolation construction: 2 * nnz(A_lev)
+    *   - RAP (Galerkin product): 2 * nnz(A_lev) * nnz(P_lev) / n_lev
     *
     * SOLVE COST PER LEVEL (lev < num_levels - 1):
     *   - Pre-smoothing:    down_sweeps * symm_mult * nnz(A_lev)
@@ -4064,7 +4126,6 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
     * VALUES ONLY VALID AFTER SUCCESSFUL SETUP COMPLETION.
     *-----------------------------------------------------------------------*/
    {
-      HYPRE_Real setup_flops = 0.0;
       HYPRE_Real solve_flops = 0.0;
       HYPRE_Int *num_grid_sweeps = hypre_ParAMGDataNumGridSweeps(amg_data);
       HYPRE_Int *grid_relax_type = hypre_ParAMGDataGridRelaxType(amg_data);
@@ -4085,8 +4146,6 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          HYPRE_Int single_relax = grid_relax_type ? grid_relax_type[0] : 3;
          HYPRE_Int symm_mult = IS_SYMMETRIC_RELAX(single_relax) ? 2 : 1;
 
-         /* No coarsening needed for single level */
-         setup_flops = nnz_A;
          solve_flops = (HYPRE_Real) (single_sweeps * symm_mult) * nnz_A;
       }
       else
@@ -4131,10 +4190,6 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
             if (lev < num_levels - 1)
             {
                HYPRE_Real nnz_P = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(P_array[lev]);
-               HYPRE_Real nnz_A_coarse = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[lev + 1]);
-
-               /* Setup: strength + coarsening + interp + RAP (approximate) */
-               setup_flops += nnz_A + nnz_P + nnz_A_coarse;
 
                /* Solve per cycle: smooth + residual + restrict + interp */
                /* All operations at this level are multiplied by cycle_mult */
@@ -4154,7 +4209,7 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 
       #undef IS_SYMMETRIC_RELAX
 
-      hypre_ParAMGDataSetupFlops(amg_data) = setup_flops;
+      /* Setup FLOPs already accumulated during setup; only set solve FLOPs here */
       hypre_ParAMGDataSolveFlops(amg_data) = solve_flops;
    }
 
