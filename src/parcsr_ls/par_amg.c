@@ -5261,6 +5261,11 @@ hypre_BoomerAMGGetSetupFlops( void       *data,
       hypre_error_in_arg(1);
       return hypre_error_flag;
    }
+   if (!setup_flops)
+   {
+      hypre_error_in_arg(2);
+      return hypre_error_flag;
+   }
    *setup_flops = hypre_ParAMGDataSetupFlops(amg_data);
 
    return hypre_error_flag;
@@ -5275,6 +5280,11 @@ hypre_BoomerAMGGetSolveFlops( void       *data,
    if (!amg_data)
    {
       hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+   if (!solve_flops)
+   {
+      hypre_error_in_arg(2);
       return hypre_error_flag;
    }
    *solve_flops = hypre_ParAMGDataSolveFlops(amg_data);

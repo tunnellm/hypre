@@ -160,14 +160,21 @@ HYPRE_Int HYPRE_BoomerAMGSetCumNnzAP(HYPRE_Solver  solver,
 
 /**
  * Returns the estimated number of FLOPs for the setup phase.
- * This is an approximate count based on matrix sizes.
+ * This is an approximate count based on matrix sizes, only valid after
+ * successful completion of HYPRE_BoomerAMGSetup.
+ * Counting convention: FMA assumed (multiply-add as single FLOP),
+ * sparse matvec counted as nnz operations.
  **/
 HYPRE_Int HYPRE_BoomerAMGGetSetupFlops(HYPRE_Solver  solver,
                                        HYPRE_Real   *setup_flops);
 
 /**
- * Returns the estimated number of FLOPs per solve cycle (V-cycle).
- * This is computed based on matrix sizes and sweep counts.
+ * Returns the estimated number of FLOPs per solve cycle.
+ * This count is for a single V-cycle; W-cycles and F-cycles will have
+ * higher actual FLOPs due to multiple visits to coarser levels.
+ * Only valid after successful completion of HYPRE_BoomerAMGSetup.
+ * Counting convention: FMA assumed (multiply-add as single FLOP),
+ * sparse matvec counted as nnz operations.
  **/
 HYPRE_Int HYPRE_BoomerAMGGetSolveFlops(HYPRE_Solver  solver,
                                        HYPRE_Real   *solve_flops);

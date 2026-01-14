@@ -2697,6 +2697,22 @@ hypre_BoomerAMGGetCumNnzAP( void *data, HYPRE_Real *cum_nnz_AP )
 /*--------------------------------------------------------------------------*/
 
 HYPRE_Int
+hypre_BoomerAMGGetSetupFlops( void *data, HYPRE_Real *setup_flops )
+{
+   return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGGetSetupFlops)( data, setup_flops );
+}
+
+/*--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_BoomerAMGGetSolveFlops( void *data, HYPRE_Real *solve_flops )
+{
+   return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGGetSolveFlops)( data, solve_flops );
+}
+
+/*--------------------------------------------------------------------------*/
+
+HYPRE_Int
 hypre_BoomerAMGGetCumNumIterations( void *data, HYPRE_Int *cum_num_iterations )
 {
    return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGGetCumNumIterations)( data, cum_num_iterations );
