@@ -175,6 +175,8 @@ HYPRE_Int HYPRE_BoomerAMGGetSetupFlops(HYPRE_Solver  solver,
  * Only valid after successful completion of HYPRE_BoomerAMGSetup.
  * Counting convention: FMA assumed (multiply-add as single FLOP),
  * sparse matvec counted as nnz operations.
+ * Symmetric smoothers (relax types 6, 8, 21, 88, 89) are counted as
+ * 2x per sweep since they perform forward + backward passes.
  **/
 HYPRE_Int HYPRE_BoomerAMGGetSolveFlops(HYPRE_Solver  solver,
                                        HYPRE_Real   *solve_flops);

@@ -4028,27 +4028,62 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 
    /*-----------------------------------------------------------------------
     * Compute FLOP estimates based on matrix sizes.
-    * Note: solve_flops is computed for a single V-cycle. For W-cycles or
-    * F-cycles, the actual FLOPs will be higher due to multiple visits to
-    * coarser levels. Values are only valid after successful setup completion.
-    * Counting convention: FMA assumed (mults/divs only), sparse matvec = nnz.
+    *
+    * ASSUMPTIONS:
+    *   - FMA (fused multiply-add) counted as single FLOP
+    *   - Sparse matvec with matrix M costs nnz(M) FLOPs
+    *   - Smoothing sweep costs nnz(A_lev) FLOPs per sweep
+    *   - Symmetric smoothers (types 6, 8, 21, 88, 89) do 2 passes per sweep
+    *   - Setup costs are rough approximations; actual costs vary by
+    *     coarsening type, interpolation type, and strength threshold
+    *
+    * SETUP COST PER LEVEL (lev < num_levels - 1):
+    *   Let A_lev = level matrix, P_lev = interpolation, A_{lev+1} = coarse matrix
+    *   - Strength computation:     ~nnz(A_lev)
+    *   - Coarsening:               included in above
+    *   - Interpolation construct:  ~nnz(P_lev)
+    *   - RAP (Galerkin product):   ~nnz(A_{lev+1})
+    *   - Total per level:          nnz(A_lev) + nnz(P_lev) + nnz(A_{lev+1})
+    *
+    * SOLVE COST PER V-CYCLE PER LEVEL (lev < num_levels - 1):
+    *   - Pre-smoothing:   down_sweeps * symm_mult * nnz(A_lev)
+    *   - Residual r=f-Au: nnz(A_lev)
+    *   - Restriction P^T*r: nnz(P_lev)
+    *   - Interpolation P*e: nnz(P_lev)
+    *   - Post-smoothing:  up_sweeps * symm_mult * nnz(A_lev)
+    *   where symm_mult = 2 for symmetric smoothers, 1 otherwise
+    *
+    * SOLVE COST AT COARSEST LEVEL:
+    *   - coarse_sweeps * symm_mult * nnz(A_coarse)
+    *
+    * LIMITATIONS:
+    *   - solve_flops is for a single V-cycle; W-cycles and F-cycles
+    *     have higher costs due to multiple visits to coarser levels
+    *   - Values only valid after successful setup completion
     *-----------------------------------------------------------------------*/
    {
       HYPRE_Real setup_flops = 0.0;
       HYPRE_Real solve_flops = 0.0;
       HYPRE_Int *num_grid_sweeps = hypre_ParAMGDataNumGridSweeps(amg_data);
+      HYPRE_Int *grid_relax_type = hypre_ParAMGDataGridRelaxType(amg_data);
       HYPRE_Int num_levels = hypre_ParAMGDataNumLevels(amg_data);
       HYPRE_Int lev;
 
-      /* Handle single-level case: uses num_grid_sweeps[0] */
+      /* Helper macro: check if relax_type is symmetric (forward + backward sweep) */
+      /* Symmetric types: 6 (SSOR), 8 (L1-SSOR), 21 (8 forced seq), 88, 89 */
+      #define IS_SYMMETRIC_RELAX(rt) ((rt) == 6 || (rt) == 8 || (rt) == 21 || (rt) == 88 || (rt) == 89)
+
+      /* Handle single-level case: uses num_grid_sweeps[0] and grid_relax_type[0] */
       if (num_levels == 1)
       {
          HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[0]);
          HYPRE_Int single_sweeps = num_grid_sweeps ? num_grid_sweeps[0] : 1;
+         HYPRE_Int single_relax = grid_relax_type ? grid_relax_type[0] : 3;
+         HYPRE_Int symm_mult = IS_SYMMETRIC_RELAX(single_relax) ? 2 : 1;
 
          /* No coarsening needed for single level */
          setup_flops = nnz_A;
-         solve_flops = (HYPRE_Real) single_sweeps * nnz_A;
+         solve_flops = (HYPRE_Real) (single_sweeps * symm_mult) * nnz_A;
       }
       else
       {
@@ -4056,6 +4091,16 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          HYPRE_Int down_sweeps = num_grid_sweeps ? num_grid_sweeps[1] : 1;
          HYPRE_Int up_sweeps = num_grid_sweeps ? num_grid_sweeps[2] : 1;
          HYPRE_Int coarse_sweeps = num_grid_sweeps ? num_grid_sweeps[3] : 1;
+
+         /* Get relax types for each cycle phase */
+         HYPRE_Int down_relax = grid_relax_type ? grid_relax_type[1] : 3;
+         HYPRE_Int up_relax = grid_relax_type ? grid_relax_type[2] : 3;
+         HYPRE_Int coarse_relax = grid_relax_type ? grid_relax_type[3] : 9;
+
+         /* Symmetric multipliers: 2x for symmetric smoothers */
+         HYPRE_Int down_symm = IS_SYMMETRIC_RELAX(down_relax) ? 2 : 1;
+         HYPRE_Int up_symm = IS_SYMMETRIC_RELAX(up_relax) ? 2 : 1;
+         HYPRE_Int coarse_symm = IS_SYMMETRIC_RELAX(coarse_relax) ? 2 : 1;
 
          for (lev = 0; lev < num_levels; lev++)
          {
@@ -4070,19 +4115,21 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                setup_flops += nnz_A + nnz_P + nnz_A_coarse;
 
                /* Solve per V-cycle: smooth + residual + restrict + interp */
-               solve_flops += (HYPRE_Real) down_sweeps * nnz_A;  /* pre-smooth */
-               solve_flops += nnz_A;                              /* residual */
-               solve_flops += nnz_P;                              /* restriction */
-               solve_flops += nnz_P;                              /* interpolation */
-               solve_flops += (HYPRE_Real) up_sweeps * nnz_A;    /* post-smooth */
+               solve_flops += (HYPRE_Real) (down_sweeps * down_symm) * nnz_A;  /* pre-smooth */
+               solve_flops += nnz_A;                                           /* residual */
+               solve_flops += nnz_P;                                           /* restriction */
+               solve_flops += nnz_P;                                           /* interpolation */
+               solve_flops += (HYPRE_Real) (up_sweeps * up_symm) * nnz_A;      /* post-smooth */
             }
             else
             {
                /* Coarse level solve */
-               solve_flops += (HYPRE_Real) coarse_sweeps * nnz_A;
+               solve_flops += (HYPRE_Real) (coarse_sweeps * coarse_symm) * nnz_A;
             }
          }
       }
+
+      #undef IS_SYMMETRIC_RELAX
 
       hypre_ParAMGDataSetupFlops(amg_data) = setup_flops;
       hypre_ParAMGDataSolveFlops(amg_data) = solve_flops;
