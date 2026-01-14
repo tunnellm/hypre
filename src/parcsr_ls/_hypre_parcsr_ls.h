@@ -883,6 +883,9 @@ typedef struct hypre_ParFSAIData_struct
    /* Log info data */
    HYPRE_Int             logging;
    HYPRE_Int             print_level;
+
+   /* FLOP counting */
+   HYPRE_Real            setup_flops;      /* FLOPs accumulated during setup */
 } hypre_ParFSAIData;
 
 /*--------------------------------------------------------------------------
@@ -920,6 +923,9 @@ typedef struct hypre_ParFSAIData_struct
 /* Log info data */
 #define hypre_ParFSAIDataLogging(fsai_data)                 ((fsai_data) -> logging)
 #define hypre_ParFSAIDataPrintLevel(fsai_data)              ((fsai_data) -> print_level)
+
+/* FLOP counting */
+#define hypre_ParFSAIDataSetupFlops(fsai_data)              ((fsai_data) -> setup_flops)
 
 #endif
 /******************************************************************************
@@ -3692,6 +3698,7 @@ HYPRE_Int hypre_FSAIGetOmega ( void *data, HYPRE_Real *omega );
 HYPRE_Int hypre_FSAIGetLogging ( void *data, HYPRE_Int *logging );
 HYPRE_Int hypre_FSAIGetNumIterations ( void *data, HYPRE_Int *num_iterations );
 HYPRE_Int hypre_FSAIGetPrintLevel ( void *data, HYPRE_Int *print_level );
+HYPRE_Int hypre_FSAIGetSetupFlops ( void *data, HYPRE_Real *setup_flops );
 
 /* par_fsai_setup.c */
 HYPRE_Int hypre_CSRMatrixExtractDenseMat ( hypre_CSRMatrix *A, hypre_Vector *A_sub,
@@ -3702,7 +3709,8 @@ HYPRE_Int hypre_CSRMatrixExtractDenseRow ( hypre_CSRMatrix *A, hypre_Vector *A_s
 HYPRE_Int hypre_FindKapGrad ( hypre_CSRMatrix *A_diag, hypre_Vector *kaporin_gradient,
                               HYPRE_Int *kap_grad_nonzeros, hypre_Vector *G_temp,
                               HYPRE_Int *S_Pattern, HYPRE_Int S_nnz,
-                              HYPRE_Int max_row_size, HYPRE_Int row_num, HYPRE_Int *kg_marker );
+                              HYPRE_Int max_row_size, HYPRE_Int row_num, HYPRE_Int *kg_marker,
+                              HYPRE_Real *flops );
 HYPRE_Int hypre_AddToPattern ( hypre_Vector *kaporin_gradient, HYPRE_Int *kap_grad_nonzeros,
                                HYPRE_Int *S_Pattern, HYPRE_Int *S_nnz, HYPRE_Int *kg_marker,
                                HYPRE_Int max_step_size );

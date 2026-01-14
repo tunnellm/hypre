@@ -1959,6 +1959,15 @@ HYPRE_Int HYPRE_FSAISetPrintLevel(HYPRE_Solver solver,
 HYPRE_Int HYPRE_FSAISetZeroGuess(HYPRE_Solver solver,
                                  HYPRE_Int    zero_guess);
 
+/**
+ * (Optional) Get the number of FLOPs accumulated during setup.
+ *
+ * Counts multiplications and divisions assuming fused multiply-add (FMA).
+ * Includes dense Cholesky solves and gradient computations.
+ **/
+HYPRE_Int HYPRE_FSAIGetSetupFlops(HYPRE_Solver solver,
+                                  HYPRE_Real  *setup_flops);
+
 /**@}*/
 
 /*--------------------------------------------------------------------------

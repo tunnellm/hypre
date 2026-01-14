@@ -47,6 +47,9 @@ typedef struct hypre_ParFSAIData_struct
    /* Log info data */
    HYPRE_Int             logging;
    HYPRE_Int             print_level;
+
+   /* FLOP counting */
+   HYPRE_Real            setup_flops;      /* FLOPs accumulated during setup */
 } hypre_ParFSAIData;
 
 /*--------------------------------------------------------------------------
@@ -84,5 +87,8 @@ typedef struct hypre_ParFSAIData_struct
 /* Log info data */
 #define hypre_ParFSAIDataLogging(fsai_data)                 ((fsai_data) -> logging)
 #define hypre_ParFSAIDataPrintLevel(fsai_data)              ((fsai_data) -> print_level)
+
+/* FLOP counting */
+#define hypre_ParFSAIDataSetupFlops(fsai_data)              ((fsai_data) -> setup_flops)
 
 #endif
