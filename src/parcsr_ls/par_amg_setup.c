@@ -4026,5 +4026,50 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
    hypre_GpuProfilingPopRange();
    HYPRE_ANNOTATE_FUNC_END;
 
+   /*-----------------------------------------------------------------------
+    * Compute FLOP estimates based on matrix sizes
+    *-----------------------------------------------------------------------*/
+   {
+      HYPRE_Real setup_flops_val = 0.0;
+      HYPRE_Real solve_flops_val = 0.0;
+      HYPRE_Int *num_grid_sweeps_data = hypre_ParAMGDataNumGridSweeps(amg_data);
+      HYPRE_Int num_levels_val = hypre_ParAMGDataNumLevels(amg_data);
+      HYPRE_Int lev;
+
+      /* Default sweep counts if not set */
+      HYPRE_Int down_sweeps = num_grid_sweeps_data ? num_grid_sweeps_data[1] : 1;
+      HYPRE_Int up_sweeps = num_grid_sweeps_data ? num_grid_sweeps_data[2] : 1;
+      HYPRE_Int coarse_sweeps = num_grid_sweeps_data ? num_grid_sweeps_data[3] : 1;
+
+      for (lev = 0; lev < num_levels_val; lev++)
+      {
+         HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[lev]);
+
+         if (lev < num_levels_val - 1)
+         {
+            HYPRE_Real nnz_P = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(P_array[lev]);
+            HYPRE_Real nnz_A_coarse = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[lev + 1]);
+
+            /* Setup: strength + coarsening + interp + RAP (approximate) */
+            setup_flops_val += nnz_A + nnz_P + nnz_A_coarse;
+
+            /* Solve per V-cycle: smooth + residual + restrict + interp */
+            solve_flops_val += (HYPRE_Real) down_sweeps * nnz_A;  /* pre-smooth */
+            solve_flops_val += nnz_A;                              /* residual */
+            solve_flops_val += nnz_P;                              /* restriction */
+            solve_flops_val += nnz_P;                              /* interpolation */
+            solve_flops_val += (HYPRE_Real) up_sweeps * nnz_A;    /* post-smooth */
+         }
+         else
+         {
+            /* Coarse level solve */
+            solve_flops_val += (HYPRE_Real) coarse_sweeps * nnz_A;
+         }
+      }
+
+      hypre_ParAMGDataSetupFlops(amg_data) = setup_flops_val;
+      hypre_ParAMGDataSolveFlops(amg_data) = solve_flops_val;
+   }
+
    return (hypre_error_flag);
 }

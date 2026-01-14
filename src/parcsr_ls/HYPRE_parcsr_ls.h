@@ -159,6 +159,20 @@ HYPRE_Int HYPRE_BoomerAMGSetCumNnzAP(HYPRE_Solver  solver,
                                      HYPRE_Real    cum_nnz_AP);
 
 /**
+ * Returns the estimated number of FLOPs for the setup phase.
+ * This is an approximate count based on matrix sizes.
+ **/
+HYPRE_Int HYPRE_BoomerAMGGetSetupFlops(HYPRE_Solver  solver,
+                                       HYPRE_Real   *setup_flops);
+
+/**
+ * Returns the estimated number of FLOPs per solve cycle (V-cycle).
+ * This is computed based on matrix sizes and sweep counts.
+ **/
+HYPRE_Int HYPRE_BoomerAMGGetSolveFlops(HYPRE_Solver  solver,
+                                       HYPRE_Real   *solve_flops);
+
+/**
  * Returns the norm of the final relative residual.
  **/
 HYPRE_Int HYPRE_BoomerAMGGetFinalRelativeResidualNorm(HYPRE_Solver  solver,

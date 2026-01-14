@@ -214,6 +214,8 @@ typedef struct
    hypre_Vector      *Vtemp_local;
    HYPRE_Real        *Vtemp_local_data;
    HYPRE_Real         cycle_op_count;
+   HYPRE_Real         setup_flops;      /* FLOPs accumulated during setup */
+   HYPRE_Real         solve_flops;      /* FLOPs per solve cycle */
    hypre_ParVector   *Rtemp;
    hypre_ParVector   *Ptemp;
    hypre_ParVector   *Ztemp;
@@ -480,6 +482,8 @@ typedef struct
 #define hypre_ParAMGDataVtempLocal(amg_data) ((amg_data)->Vtemp_local)
 #define hypre_ParAMGDataVtemplocalData(amg_data) ((amg_data)->Vtemp_local_data)
 #define hypre_ParAMGDataCycleOpCount(amg_data) ((amg_data)->cycle_op_count)
+#define hypre_ParAMGDataSetupFlops(amg_data) ((amg_data)->setup_flops)
+#define hypre_ParAMGDataSolveFlops(amg_data) ((amg_data)->solve_flops)
 #define hypre_ParAMGDataRtemp(amg_data) ((amg_data)->Rtemp)
 #define hypre_ParAMGDataPtemp(amg_data) ((amg_data)->Ptemp)
 #define hypre_ParAMGDataZtemp(amg_data) ((amg_data)->Ztemp)
@@ -2066,6 +2070,8 @@ HYPRE_Int hypre_BoomerAMGSetFPoints( void *data, HYPRE_Int isolated, HYPRE_Int n
                                      HYPRE_BigInt *indices );
 HYPRE_Int hypre_BoomerAMGSetCumNnzAP ( void *data, HYPRE_Real cum_nnz_AP );
 HYPRE_Int hypre_BoomerAMGGetCumNnzAP ( void *data, HYPRE_Real *cum_nnz_AP );
+HYPRE_Int hypre_BoomerAMGGetSetupFlops ( void *data, HYPRE_Real *setup_flops );
+HYPRE_Int hypre_BoomerAMGGetSolveFlops ( void *data, HYPRE_Real *solve_flops );
 
 /* par_amg_setup.c */
 HYPRE_Int hypre_BoomerAMGSetup ( void *amg_vdata, hypre_ParCSRMatrix *A, hypre_ParVector *f,
