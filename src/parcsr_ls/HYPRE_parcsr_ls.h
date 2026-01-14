@@ -170,8 +170,8 @@ HYPRE_Int HYPRE_BoomerAMGGetSetupFlops(HYPRE_Solver  solver,
 
 /**
  * Returns the estimated number of FLOPs per solve cycle.
- * This count is for a single V-cycle; W-cycles and F-cycles will have
- * higher actual FLOPs due to multiple visits to coarser levels.
+ * Accounts for cycle type: V-cycle (1 visit/level), W-cycle (2^lev visits),
+ * and F-cycle ((num_levels - lev) visits).
  * Only valid after successful completion of HYPRE_BoomerAMGSetup.
  * Counting convention: FMA assumed (multiply-add as single FLOP),
  * sparse matvec counted as nnz operations.

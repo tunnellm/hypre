@@ -4045,21 +4045,23 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
     *   - RAP (Galerkin product):   ~nnz(A_{lev+1})
     *   - Total per level:          nnz(A_lev) + nnz(P_lev) + nnz(A_{lev+1})
     *
-    * SOLVE COST PER V-CYCLE PER LEVEL (lev < num_levels - 1):
-    *   - Pre-smoothing:   down_sweeps * symm_mult * nnz(A_lev)
-    *   - Residual r=f-Au: nnz(A_lev)
+    * SOLVE COST PER LEVEL (lev < num_levels - 1):
+    *   - Pre-smoothing:    down_sweeps * symm_mult * nnz(A_lev)
+    *   - Residual r=f-Au:  nnz(A_lev)
     *   - Restriction P^T*r: nnz(P_lev)
     *   - Interpolation P*e: nnz(P_lev)
-    *   - Post-smoothing:  up_sweeps * symm_mult * nnz(A_lev)
+    *   - Post-smoothing:   up_sweeps * symm_mult * nnz(A_lev)
     *   where symm_mult = 2 for symmetric smoothers, 1 otherwise
     *
     * SOLVE COST AT COARSEST LEVEL:
     *   - coarse_sweeps * symm_mult * nnz(A_coarse)
     *
-    * LIMITATIONS:
-    *   - solve_flops is for a single V-cycle; W-cycles and F-cycles
-    *     have higher costs due to multiple visits to coarser levels
-    *   - Values only valid after successful setup completion
+    * CYCLE TYPE MULTIPLIERS (visits per level per cycle):
+    *   - V-cycle (cycle_type=1): 1 visit at all levels
+    *   - W-cycle (cycle_type=2): 2^lev visits at level lev (lev>0), 1 at finest
+    *   - F-cycle: (num_levels - lev) visits at level lev
+    *
+    * VALUES ONLY VALID AFTER SUCCESSFUL SETUP COMPLETION.
     *-----------------------------------------------------------------------*/
    {
       HYPRE_Real setup_flops = 0.0;
@@ -4067,6 +4069,8 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       HYPRE_Int *num_grid_sweeps = hypre_ParAMGDataNumGridSweeps(amg_data);
       HYPRE_Int *grid_relax_type = hypre_ParAMGDataGridRelaxType(amg_data);
       HYPRE_Int num_levels = hypre_ParAMGDataNumLevels(amg_data);
+      HYPRE_Int cycle_type = hypre_ParAMGDataCycleType(amg_data);
+      HYPRE_Int fcycle = hypre_ParAMGDataFCycle(amg_data);
       HYPRE_Int lev;
 
       /* Helper macro: check if relax_type is symmetric (forward + backward sweep) */
@@ -4106,6 +4110,24 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          {
             HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[lev]);
 
+            /* Compute cycle multiplier: number of visits to this level per cycle */
+            HYPRE_Int cycle_mult;
+            if (fcycle)
+            {
+               /* F-cycle: (num_levels - lev) visits at level lev */
+               cycle_mult = num_levels - lev;
+            }
+            else if (cycle_type == 2)
+            {
+               /* W-cycle: 2^lev visits at level lev (except finest = 1) */
+               cycle_mult = (lev == 0) ? 1 : (1 << lev);
+            }
+            else
+            {
+               /* V-cycle (default): 1 visit at all levels */
+               cycle_mult = 1;
+            }
+
             if (lev < num_levels - 1)
             {
                HYPRE_Real nnz_P = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(P_array[lev]);
@@ -4114,17 +4136,18 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                /* Setup: strength + coarsening + interp + RAP (approximate) */
                setup_flops += nnz_A + nnz_P + nnz_A_coarse;
 
-               /* Solve per V-cycle: smooth + residual + restrict + interp */
-               solve_flops += (HYPRE_Real) (down_sweeps * down_symm) * nnz_A;  /* pre-smooth */
-               solve_flops += nnz_A;                                           /* residual */
-               solve_flops += nnz_P;                                           /* restriction */
-               solve_flops += nnz_P;                                           /* interpolation */
-               solve_flops += (HYPRE_Real) (up_sweeps * up_symm) * nnz_A;      /* post-smooth */
+               /* Solve per cycle: smooth + residual + restrict + interp */
+               /* All operations at this level are multiplied by cycle_mult */
+               solve_flops += (HYPRE_Real) (cycle_mult * down_sweeps * down_symm) * nnz_A;  /* pre-smooth */
+               solve_flops += (HYPRE_Real) cycle_mult * nnz_A;                              /* residual */
+               solve_flops += (HYPRE_Real) cycle_mult * nnz_P;                              /* restriction */
+               solve_flops += (HYPRE_Real) cycle_mult * nnz_P;                              /* interpolation */
+               solve_flops += (HYPRE_Real) (cycle_mult * up_sweeps * up_symm) * nnz_A;     /* post-smooth */
             }
             else
             {
                /* Coarse level solve */
-               solve_flops += (HYPRE_Real) (coarse_sweeps * coarse_symm) * nnz_A;
+               solve_flops += (HYPRE_Real) (cycle_mult * coarse_sweeps * coarse_symm) * nnz_A;
             }
          }
       }
