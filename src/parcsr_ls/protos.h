@@ -584,6 +584,8 @@ HYPRE_Int hypre_ParChebyGetMinMaxEigEst( hypre_ParChebyData *cheby_data,
 HYPRE_Int hypre_ParChebySetTempVectors( hypre_ParChebyData *cheby_data,
                                         hypre_ParVector *Ptemp, hypre_ParVector *Rtemp,
                                         hypre_ParVector *Vtemp, hypre_ParVector *Ztemp );
+HYPRE_Int hypre_ParChebyGetSetupFlops( hypre_ParChebyData *cheby_data, HYPRE_Real *setup_flops );
+HYPRE_Int hypre_ParChebyGetApplyFlops( hypre_ParChebyData *cheby_data, HYPRE_Real *apply_flops );
 
 /* par_cheby_setup.c */
 HYPRE_Int hypre_ParChebySetup( hypre_ParChebyData *cheby_data, hypre_ParCSRMatrix *A,

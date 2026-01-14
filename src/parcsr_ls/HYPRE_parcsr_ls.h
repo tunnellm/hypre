@@ -2114,6 +2114,24 @@ HYPRE_Int HYPRE_ParChebyGetMinMaxEigEst( HYPRE_Solver solver,
 HYPRE_Int HYPRE_ParChebySetZeroGuess(HYPRE_Solver solver,
                                      HYPRE_Int    zero_guess);
 
+/**
+ * (Optional) Get the number of FLOPs accumulated during setup.
+ *
+ * Counts multiplications assuming fused multiply-add (FMA).
+ * For eig_est > 0: eig_est iterations of CG for eigenvalue estimation.
+ * For eig_est = 0: Gershgorin bounds (single matrix scan).
+ **/
+HYPRE_Int HYPRE_ParChebyGetSetupFlops(HYPRE_Solver solver,
+                                      HYPRE_Real  *setup_flops);
+
+/**
+ * (Optional) Get the number of FLOPs per apply.
+ *
+ * Computed during setup based on polynomial order, scaling, and matrix size.
+ **/
+HYPRE_Int HYPRE_ParChebyGetApplyFlops(HYPRE_Solver solver,
+                                      HYPRE_Real  *apply_flops);
+
 /**@}*/
 
 /*--------------------------------------------------------------------------

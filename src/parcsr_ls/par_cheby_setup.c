@@ -104,6 +104,46 @@ hypre_ParChebySetup( hypre_ParChebyData *cheby_data,
                                  &hypre_ParChebyDataCoefs(cheby_data),
                                  (scale) ? &hypre_ParVectorLocalData(scaling) : NULL);
 
+   /* Compute FLOP counts */
+   {
+      HYPRE_Int    local_num_rows = hypre_ParCSRMatrixNumRows(A);
+      HYPRE_Int    local_nnz      = hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A)) +
+                                    hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A));
+      HYPRE_Real   nnz_real       = (HYPRE_Real) local_nnz;
+      HYPRE_Real   n_real         = (HYPRE_Real) local_num_rows;
+
+      /* Setup FLOPs: eigenvalue estimation */
+      if (eig_provided == 0.0)
+      {
+         if (eig_est > 0)
+         {
+            /* CG-based: eig_est iterations of matvec + 4 vector ops */
+            hypre_ParChebyDataSetupFlops(cheby_data) = (HYPRE_Real) eig_est * (nnz_real + 4.0 * n_real);
+         }
+         else
+         {
+            /* Gershgorin: single matrix scan */
+            hypre_ParChebyDataSetupFlops(cheby_data) = nnz_real;
+         }
+      }
+      else
+      {
+         hypre_ParChebyDataSetupFlops(cheby_data) = 0.0;
+      }
+
+      /* Apply FLOPs per call: order iterations of matvec + vector ops */
+      if (scale)
+      {
+         /* With scaling: matvec + 3 vector ops per iteration */
+         hypre_ParChebyDataApplyFlops(cheby_data) = (HYPRE_Real) order * (nnz_real + 3.0 * n_real);
+      }
+      else
+      {
+         /* No scaling: matvec + 1 vector op per iteration */
+         hypre_ParChebyDataApplyFlops(cheby_data) = (HYPRE_Real) order * (nnz_real + n_real);
+      }
+   }
+
    HYPRE_ANNOTATE_FUNC_END;
 
    return hypre_error_flag;
