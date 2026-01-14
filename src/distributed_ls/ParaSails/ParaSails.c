@@ -1000,7 +1000,7 @@ static void ConstructPatternForEachRowExt(HYPRE_Int symmetric,
  *--------------------------------------------------------------------------*/
 
 static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
-  HYPRE_Int local_beg_row, Numbering *numb, HYPRE_Int symmetric)
+  HYPRE_Int local_beg_row, Numbering *numb, HYPRE_Int symmetric, HYPRE_Real *flops)
 {
     HYPRE_Int *marker;
     HYPRE_Int row, maxlen, len, *ind;
@@ -1171,6 +1171,10 @@ static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
             error = 1;
         }
 #endif
+
+        /* Accumulate FLOPs: (1/3)len^3 for Cholesky factor + len^2 for solve */
+        *flops += ((HYPRE_Real)len * (HYPRE_Real)len * (HYPRE_Real)len) / 3.0 +
+                  (HYPRE_Real)len * (HYPRE_Real)len;
 
 #ifdef PARASAILS_DEBUG
         time1 = hypre_MPI_Wtime();
@@ -1636,6 +1640,7 @@ ParaSails *ParaSailsCreate(MPI_Comm comm, HYPRE_Int beg_row, HYPRE_Int end_row, 
     ps->cost               = 0.0;
     ps->setup_pattern_time = 0.0;
     ps->setup_values_time  = 0.0;
+    ps->setup_flops        = 0.0;
     ps->numb               = NULL;
     ps->M                  = NULL;
     ps->comm               = comm;
@@ -1786,6 +1791,9 @@ HYPRE_Int ParaSailsSetupValues(ParaSails *ps, Matrix *A, HYPRE_Real filter)
 
     time0 = hypre_MPI_Wtime();
 
+    /* Reset FLOP counter */
+    ps->setup_flops = 0.0;
+
     /*
      * If the preconditioner matrix has its own numbering object, then we
      * assume it is in its own local numbering, and we change the numbering
@@ -1817,14 +1825,14 @@ HYPRE_Int ParaSailsSetupValues(ParaSails *ps, Matrix *A, HYPRE_Real filter)
     {
         error +=
           ComputeValuesSym(stored_rows, ps->M, load_bal->beg_row, ps->numb,
-            ps->symmetric);
+            ps->symmetric, &ps->setup_flops);
 
         for (i=0; i<load_bal->num_taken; i++)
         {
             error += ComputeValuesSym(stored_rows,
                 load_bal->recip_data[i].mat,
                 load_bal->recip_data[i].mat->beg_row, ps->numb,
-                ps->symmetric);
+                ps->symmetric, &ps->setup_flops);
         }
     }
     else
@@ -2072,4 +2080,13 @@ void ParaSailsStatsValues(ParaSails *ps, Matrix *A)
     hypre_TFree(setup_times,HYPRE_MEMORY_HOST);
 
     fflush(stdout);
+}
+
+/*--------------------------------------------------------------------------
+ * ParaSailsGetSetupFlops - Return the FLOPs accumulated during setup.
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Real ParaSailsGetSetupFlops(ParaSails *ps)
+{
+    return ps->setup_flops;
 }

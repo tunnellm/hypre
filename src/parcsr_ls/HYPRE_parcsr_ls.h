@@ -2290,6 +2290,16 @@ HYPRE_Int HYPRE_ParaSailsSetLogging(HYPRE_Solver solver,
 HYPRE_Int HYPRE_ParaSailsBuildIJMatrix(HYPRE_Solver    solver,
                                        HYPRE_IJMatrix *pij_A);
 
+/**
+ * (Optional) Get the number of FLOPs accumulated during ParaSails setup.
+ * Only valid for symmetric mode (returns 0 for nonsymmetric).
+ *
+ * @param solver [IN] Preconditioner object.
+ * @param setup_flops [OUT] Pointer to store the FLOP count.
+ **/
+HYPRE_Int HYPRE_ParaSailsGetSetupFlops(HYPRE_Solver  solver,
+                                       HYPRE_Real   *setup_flops);
+
 /* ParCSRParaSails routines */
 
 HYPRE_Int HYPRE_ParCSRParaSailsCreate(MPI_Comm      comm,
