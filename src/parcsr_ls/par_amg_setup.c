@@ -3233,6 +3233,13 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       if (coarse_size <= coarse_threshold)
       {
          hypre_GaussElimSetup(amg_data, level, grid_relax_type[3]);
+
+         /* Accumulate GE setup FLOP cost: O(n³) for LU factorization
+          * Dense n×n matrix factorization costs ~(2/3)n³ FLOPs */
+         {
+            HYPRE_Real n = (HYPRE_Real) coarse_size;
+            hypre_ParAMGDataSetupFlops(amg_data) += (2.0 / 3.0) * n * n * n;
+         }
       }
       else
       {
@@ -4133,20 +4140,47 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       HYPRE_Int cycle_type = hypre_ParAMGDataCycleType(amg_data);
       HYPRE_Int fcycle = hypre_ParAMGDataFCycle(amg_data);
       HYPRE_Int lev;
+      HYPRE_Int cheby_order = hypre_ParAMGDataChebyOrder(amg_data);
 
       /* Helper macro: check if relax_type is symmetric (forward + backward sweep) */
       /* Symmetric types: 6 (SSOR), 8 (L1-SSOR), 21 (8 forced seq), 88, 89 */
       #define IS_SYMMETRIC_RELAX(rt) ((rt) == 6 || (rt) == 8 || (rt) == 21 || (rt) == 88 || (rt) == 89)
 
-      /* Handle single-level case: uses num_grid_sweeps[0] and grid_relax_type[0] */
+      /* Helper macro: check if relax_type is Chebyshev (type 16) */
+      #define IS_CHEBYSHEV_RELAX(rt) ((rt) == 16)
+
+      /* Helper macro: check if coarse solve uses Gaussian elimination (dense O(n²) solve) */
+      /* Types 9, 19, 98, 99, 198, 199 use dense GE solve */
+      #define IS_DENSE_COARSE_SOLVE(rt) ((rt) == 9 || (rt) == 19 || (rt) == 98 || (rt) == 99 || (rt) == 198 || (rt) == 199)
+
+      /* Handle single-level case: uses num_grid_sweeps[0] and UserRelaxType */
+      /* Note: par_cycle.c uses UserRelaxType for single-level, with fallback to 6 (SSOR) */
       if (num_levels == 1)
       {
-         HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[0]);
          HYPRE_Int single_sweeps = num_grid_sweeps ? num_grid_sweeps[0] : 1;
-         HYPRE_Int single_relax = grid_relax_type ? grid_relax_type[0] : 3;
-         HYPRE_Int symm_mult = IS_SYMMETRIC_RELAX(single_relax) ? 2 : 1;
+         HYPRE_Int single_relax = hypre_ParAMGDataUserRelaxType(amg_data);
+         if (single_relax == -1)
+         {
+            single_relax = 6;  /* Default: SSOR */
+         }
 
-         solve_flops = (HYPRE_Real) (single_sweeps * symm_mult) * nnz_A;
+         /* Check for dense GE solve first */
+         if (IS_DENSE_COARSE_SOLVE(single_relax))
+         {
+            /* Dense GE solve: 2*n² per solve (forward + back substitution) */
+            HYPRE_BigInt n = hypre_ParCSRMatrixGlobalNumRows(A_array[0]);
+            solve_flops = (HYPRE_Real) single_sweeps * 2.0 * (HYPRE_Real) n * (HYPRE_Real) n;
+         }
+         else
+         {
+            /* Iterative smoother */
+            HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[0]);
+            HYPRE_Int symm_mult = IS_SYMMETRIC_RELAX(single_relax) ? 2 : 1;
+            /* Chebyshev does k matvecs per sweep, where k = cheby_order */
+            HYPRE_Int cheby_mult = IS_CHEBYSHEV_RELAX(single_relax) ? cheby_order : 1;
+
+            solve_flops = (HYPRE_Real) (single_sweeps * symm_mult * cheby_mult) * nnz_A;
+         }
       }
       else
       {
@@ -4165,26 +4199,31 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          HYPRE_Int up_symm = IS_SYMMETRIC_RELAX(up_relax) ? 2 : 1;
          HYPRE_Int coarse_symm = IS_SYMMETRIC_RELAX(coarse_relax) ? 2 : 1;
 
+         /* Chebyshev multipliers: k matvecs per sweep */
+         HYPRE_Int down_cheby = IS_CHEBYSHEV_RELAX(down_relax) ? cheby_order : 1;
+         HYPRE_Int up_cheby = IS_CHEBYSHEV_RELAX(up_relax) ? cheby_order : 1;
+         HYPRE_Int coarse_cheby = IS_CHEBYSHEV_RELAX(coarse_relax) ? cheby_order : 1;
+
          for (lev = 0; lev < num_levels; lev++)
          {
             HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[lev]);
 
             /* Compute cycle multiplier: number of visits to this level per cycle */
-            HYPRE_Int cycle_mult;
+            HYPRE_Real cycle_mult;
             if (fcycle)
             {
                /* F-cycle: (num_levels - lev) visits at level lev */
-               cycle_mult = num_levels - lev;
+               cycle_mult = (HYPRE_Real)(num_levels - lev);
             }
             else if (cycle_type == 2)
             {
                /* W-cycle: 2^lev visits at level lev (except finest = 1) */
-               cycle_mult = (lev == 0) ? 1 : (1 << lev);
+               cycle_mult = (lev == 0) ? 1.0 : hypre_pow(2.0, (HYPRE_Real)lev);
             }
             else
             {
                /* V-cycle (default): 1 visit at all levels */
-               cycle_mult = 1;
+               cycle_mult = 1.0;
             }
 
             if (lev < num_levels - 1)
@@ -4193,21 +4232,44 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 
                /* Solve per cycle: smooth + residual + restrict + interp */
                /* All operations at this level are multiplied by cycle_mult */
-               solve_flops += (HYPRE_Real) (cycle_mult * down_sweeps * down_symm) * nnz_A;  /* pre-smooth */
+               solve_flops += (HYPRE_Real) (cycle_mult * down_sweeps * down_symm * down_cheby) * nnz_A;  /* pre-smooth */
                solve_flops += (HYPRE_Real) cycle_mult * nnz_A;                              /* residual */
                solve_flops += (HYPRE_Real) cycle_mult * nnz_P;                              /* restriction */
                solve_flops += (HYPRE_Real) cycle_mult * nnz_P;                              /* interpolation */
-               solve_flops += (HYPRE_Real) (cycle_mult * up_sweeps * up_symm) * nnz_A;     /* post-smooth */
+               solve_flops += (HYPRE_Real) (cycle_mult * up_sweeps * up_symm * up_cheby) * nnz_A;       /* post-smooth */
             }
             else
             {
                /* Coarse level solve */
-               solve_flops += (HYPRE_Real) (cycle_mult * coarse_sweeps * coarse_symm) * nnz_A;
+               /* Check if seqAMG or DSLU was set up - these take precedence over GE */
+               if (hypre_ParAMGDataParticipate(amg_data))
+               {
+                  /* seqAMG: recursive BoomerAMG - FLOPs tracked internally, skip here */
+               }
+#if defined(HYPRE_USING_DSUPERLU)
+               else if (hypre_ParAMGDataDSLUSolver(amg_data) != NULL)
+               {
+                  /* DSuperLU: sparse direct - FLOPs not currently tracked */
+               }
+#endif
+               else if (IS_DENSE_COARSE_SOLVE(coarse_relax))
+               {
+                  /* Dense GE solve: O(n²) per solve (forward + back substitution) */
+                  HYPRE_BigInt n_coarse = hypre_ParCSRMatrixGlobalNumRows(A_array[lev]);
+                  solve_flops += (HYPRE_Real) (cycle_mult * coarse_sweeps) * 2.0 * (HYPRE_Real) n_coarse * (HYPRE_Real) n_coarse;
+               }
+               else
+               {
+                  /* Iterative coarse solve */
+                  solve_flops += (HYPRE_Real) (cycle_mult * coarse_sweeps * coarse_symm * coarse_cheby) * nnz_A;
+               }
             }
          }
       }
 
       #undef IS_SYMMETRIC_RELAX
+      #undef IS_CHEBYSHEV_RELAX
+      #undef IS_DENSE_COARSE_SOLVE
 
       /* Setup FLOPs already accumulated during setup; only set solve FLOPs here */
       hypre_ParAMGDataSolveFlops(amg_data) = solve_flops;
