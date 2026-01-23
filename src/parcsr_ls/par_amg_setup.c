@@ -1729,10 +1729,10 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                }
 
                /* Accumulate SOC FLOP cost before early exit (coarse_size == 0 or fine_size) */
-               if (!block_mode)
                {
                   HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
-                  hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A;
+                  HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+                  hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * blk_mult;
                }
 
                HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
@@ -1767,10 +1767,10 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                }
 
                /* Accumulate SOC FLOP cost before early exit (coarse_size < min_coarse_size) */
-               if (!block_mode)
                {
                   HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
-                  hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A;
+                  HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+                  hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * blk_mult;
                }
 
                HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
@@ -1786,10 +1786,11 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          /* Accumulate SOC (strength of connection) FLOP cost: 2 * nnz(A)
           * Based on PyAMG complexity analysis: computing strong connections
           * requires comparisons with row max values */
-         if (S != NULL && !block_mode)
+         if (S != NULL)
          {
             HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
-            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A;
+            HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * blk_mult;
          }
 
          HYPRE_ANNOTATE_REGION_BEGIN("%s", "Interpolation");
@@ -2518,10 +2519,11 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          /* Accumulate interpolation construction FLOP cost
           * Based on PyAMG: classical interp cost is nnz(A) + nnz(S) + nnz(S)^2*nnz(A)/n^2
           * Simplified estimate: 2 * nnz(A) (captures iteration over A's strong connections) */
-         if (P != NULL && !block_mode)
+         if (P != NULL)
          {
             HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
-            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A;
+            HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * blk_mult;
          }
 
          HYPRE_ANNOTATE_REGION_END("%s", "Interpolation");
@@ -2952,9 +2954,10 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
                HYPRE_Real nnz_P = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(P_array[level]);
                HYPRE_BigInt n_rows = hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+               HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
                if (n_rows > 0)
                {
-                  hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * nnz_P / (HYPRE_Real) n_rows;
+                  hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * nnz_P / (HYPRE_Real) n_rows * blk_mult;
                }
             }
 
@@ -3133,14 +3136,15 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       /* Accumulate RAP (Galerkin triple product) FLOP cost
        * Based on PyAMG: RAP cost = 2 * nnz(A) * nnz(P) / n
        * (R.nnz * A.nnz / n + A.nnz * P.nnz / n, and R = P^T so R.nnz = P.nnz) */
-      if (P_array[level] != NULL && !block_mode)
+      if (P_array[level] != NULL)
       {
          HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[level]);
          HYPRE_Real nnz_P = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(P_array[level]);
          HYPRE_BigInt n_rows = hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+         HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
          if (n_rows > 0)
          {
-            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * nnz_P / (HYPRE_Real) n_rows;
+            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_A * nnz_P / (HYPRE_Real) n_rows * blk_mult;
          }
       }
 
@@ -3598,6 +3602,22 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                                        &coefs,
                                        &hypre_VectorData(cheby_ds[j]));
          cheby_coefs[j] = coefs;
+
+         /* Accumulate Chebyshev eigenvalue estimation FLOPs */
+         {
+            HYPRE_Real nnz_A = (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(A_array[j]);
+            HYPRE_Real n_rows = (HYPRE_Real) hypre_ParCSRMatrixNumRows(A_array[j]);
+            if (cheby_eig_est > 0)
+            {
+               /* CG-based: eig_est iterations of matvec + 4 vector ops */
+               hypre_ParAMGDataSetupFlops(amg_data) += (HYPRE_Real) cheby_eig_est * (nnz_A + 4.0 * n_rows);
+            }
+            else
+            {
+               /* Gershgorin: single matrix scan */
+               hypre_ParAMGDataSetupFlops(amg_data) += nnz_A;
+            }
+         }
       }
       else if (grid_relax_type[1] == 15 || (grid_relax_type[3] == 15 && j == (num_levels - 1))  )
       {
@@ -4142,6 +4162,11 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       HYPRE_Int lev;
       HYPRE_Int cheby_order = hypre_ParAMGDataChebyOrder(amg_data);
 
+      /* Block mode: multiply smoother cost by blocksize² */
+      HYPRE_Int block_mode = hypre_ParAMGDataBlockMode(amg_data);
+      HYPRE_Int num_functions = hypre_ParAMGDataNumFunctions(amg_data);
+      HYPRE_Real block_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+
       /* Helper macro: check if relax_type is symmetric (forward + backward sweep) */
       /* Symmetric types: 6 (SSOR), 8 (L1-SSOR), 21 (8 forced seq), 88, 89 */
       #define IS_SYMMETRIC_RELAX(rt) ((rt) == 6 || (rt) == 8 || (rt) == 21 || (rt) == 88 || (rt) == 89)
@@ -4167,9 +4192,9 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          /* Check for dense GE solve first */
          if (IS_DENSE_COARSE_SOLVE(single_relax))
          {
-            /* Dense GE solve: 2*n² per solve (forward + back substitution) */
+            /* Dense GE solve: n² FLOPs per solve (triangular solves) */
             HYPRE_BigInt n = hypre_ParCSRMatrixGlobalNumRows(A_array[0]);
-            solve_flops = (HYPRE_Real) single_sweeps * 2.0 * (HYPRE_Real) n * (HYPRE_Real) n;
+            solve_flops = (HYPRE_Real) single_sweeps * (HYPRE_Real) n * (HYPRE_Real) n;
          }
          else
          {
@@ -4179,7 +4204,7 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
             /* Chebyshev does k matvecs per sweep, where k = cheby_order */
             HYPRE_Int cheby_mult = IS_CHEBYSHEV_RELAX(single_relax) ? cheby_order : 1;
 
-            solve_flops = (HYPRE_Real) (single_sweeps * symm_mult * cheby_mult) * nnz_A;
+            solve_flops = (HYPRE_Real) (single_sweeps * symm_mult * cheby_mult) * nnz_A * block_mult;
          }
       }
       else
@@ -4232,11 +4257,11 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 
                /* Solve per cycle: smooth + residual + restrict + interp */
                /* All operations at this level are multiplied by cycle_mult */
-               solve_flops += (HYPRE_Real) (cycle_mult * down_sweeps * down_symm * down_cheby) * nnz_A;  /* pre-smooth */
-               solve_flops += (HYPRE_Real) cycle_mult * nnz_A;                              /* residual */
-               solve_flops += (HYPRE_Real) cycle_mult * nnz_P;                              /* restriction */
-               solve_flops += (HYPRE_Real) cycle_mult * nnz_P;                              /* interpolation */
-               solve_flops += (HYPRE_Real) (cycle_mult * up_sweeps * up_symm * up_cheby) * nnz_A;       /* post-smooth */
+               solve_flops += (HYPRE_Real) (cycle_mult * down_sweeps * down_symm * down_cheby) * nnz_A * block_mult;  /* pre-smooth */
+               solve_flops += (HYPRE_Real) cycle_mult * nnz_A * block_mult;                 /* residual */
+               solve_flops += (HYPRE_Real) cycle_mult * nnz_P * block_mult;                 /* restriction */
+               solve_flops += (HYPRE_Real) cycle_mult * nnz_P * block_mult;                 /* interpolation */
+               solve_flops += (HYPRE_Real) (cycle_mult * up_sweeps * up_symm * up_cheby) * nnz_A * block_mult;       /* post-smooth */
             }
             else
             {
@@ -4254,14 +4279,14 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 #endif
                else if (IS_DENSE_COARSE_SOLVE(coarse_relax))
                {
-                  /* Dense GE solve: O(n²) per solve (forward + back substitution) */
+                  /* Dense GE solve: n² FLOPs per solve (triangular solves) */
                   HYPRE_BigInt n_coarse = hypre_ParCSRMatrixGlobalNumRows(A_array[lev]);
-                  solve_flops += (HYPRE_Real) (cycle_mult * coarse_sweeps) * 2.0 * (HYPRE_Real) n_coarse * (HYPRE_Real) n_coarse;
+                  solve_flops += (HYPRE_Real) (cycle_mult * coarse_sweeps) * (HYPRE_Real) n_coarse * (HYPRE_Real) n_coarse;
                }
                else
                {
                   /* Iterative coarse solve */
-                  solve_flops += (HYPRE_Real) (cycle_mult * coarse_sweeps * coarse_symm * coarse_cheby) * nnz_A;
+                  solve_flops += (HYPRE_Real) (cycle_mult * coarse_sweeps * coarse_symm * coarse_cheby) * nnz_A * block_mult;
                }
             }
          }
