@@ -109,6 +109,10 @@ hypre_FSAICreate( void )
 
    hypre_FSAISetPrintLevel(fsai_data, print_level);
 
+   /* Initialize FLOP counters */
+   hypre_ParFSAIDataSetupFlops(fsai_data) = 0.0;
+   hypre_ParFSAIDataSetupGraphOps(fsai_data) = 0.0;
+
    HYPRE_ANNOTATE_FUNC_END;
 
    return (void *) fsai_data;
@@ -793,6 +797,28 @@ hypre_FSAIGetPrintLevel( void      *data,
    }
 
    *print_level = hypre_ParFSAIDataPrintLevel(fsai_data);
+
+   return hypre_error_flag;
+}
+
+
+/*--------------------------------------------------------------------------
+ * hypre_FSAIGetSetupFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_FSAIGetSetupFlops( void        *data,
+                         HYPRE_Real  *setup_flops )
+{
+   hypre_ParFSAIData  *fsai_data = (hypre_ParFSAIData*) data;
+
+   if (!fsai_data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+
+   *setup_flops = hypre_ParFSAIDataSetupFlops(fsai_data);
 
    return hypre_error_flag;
 }

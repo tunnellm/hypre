@@ -1015,6 +1015,28 @@ HYPRE_Int hypre_CreateLambda(void *amg_vdata)
    hypre_TFree(buf_data, HYPRE_MEMORY_HOST);
    hypre_TFree(level_start, HYPRE_MEMORY_HOST);
 
+   /* FLOP and graph op counting for Lambda construction:
+    * Numerical: n (D_data divisions) + 3n (Lambda diagonal) + 2*(nnz-n) (Lambda off-diagonal)
+    *          = 2n + 2*nnz
+    * Graph: n (row pointers) + n (Lambda diag col index) + (nnz-n) (Lambda off-diag col index)
+    *      = n + nnz
+    * If ns > 1, Atilde adds another n + nnz graph ops (same structure as Lambda).
+    * Note: CSR row pointer construction counted as graph work (PyAMG will need matching instrumentation).
+    */
+   {
+      HYPRE_Real n_total = (HYPRE_Real) num_rows_L;
+      HYPRE_Real nnz_total = (HYPRE_Real) num_nonzeros_diag;
+      hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * n_total + 2.0 * nnz_total;
+      if (ns > 1)
+      {
+         hypre_ParAMGDataSetupGraphOps(amg_data) += 2.0 * (n_total + nnz_total);
+      }
+      else
+      {
+         hypre_ParAMGDataSetupGraphOps(amg_data) += n_total + nnz_total;
+      }
+   }
+
    return Solve_err_flag;
 }
 
@@ -1155,6 +1177,9 @@ HYPRE_Int hypre_CreateDinv(void *amg_vdata)
    hypre_ParAMGDataDinv(amg_data) = D_inv;
    hypre_ParAMGDataRtilde(amg_data) = Rtilde;
    hypre_ParAMGDataXtilde(amg_data) = Xtilde;
+
+   /* FLOP count: 1 division per row across all additive levels */
+   hypre_ParAMGDataSetupFlops(amg_data) += (HYPRE_Real) num_rows_L;
 
    return Solve_err_flag;
 }

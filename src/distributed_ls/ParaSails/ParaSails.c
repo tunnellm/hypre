@@ -1000,7 +1000,8 @@ static void ConstructPatternForEachRowExt(HYPRE_Int symmetric,
  *--------------------------------------------------------------------------*/
 
 static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
-  HYPRE_Int local_beg_row, Numbering *numb, HYPRE_Int symmetric)
+  HYPRE_Int local_beg_row, Numbering *numb, HYPRE_Int symmetric, HYPRE_Real *flops,
+  HYPRE_Real *graph_ops)
 {
     HYPRE_Int *marker;
     HYPRE_Int row, maxlen, len, *ind;
@@ -1010,6 +1011,8 @@ static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
     HYPRE_Int i, j, len2, *ind2, loc;
     HYPRE_Real *val2, temp;
     HYPRE_Int error = 0;
+    HYPRE_Real local_graph_ops = 0.0;
+    HYPRE_Real ahat_entries_scanned = 0.0;
 
 #ifdef PARASAILS_DEBUG
     HYPRE_Real time0, time1;
@@ -1052,6 +1055,8 @@ static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
         /* Fill marker array in locations of local indices */
         for (i=0; i<len; i++)
             marker[ind[i]] = i;
+        /* Graph ops: len marker assignments */
+        local_graph_ops += (HYPRE_Real) len;
 
         /* Initialize ahat to zero */
 #ifdef ESSL
@@ -1068,10 +1073,12 @@ static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
 
         /* Form ahat matrix, entries correspond to indices in "ind" only */
         ahatp = ahat;
+        ahat_entries_scanned = 0.0;
         for (i=0; i<len; i++)
         {
             StoredRowsGet(stored_rows, ind[i], &len2, &ind2, &val2);
             hypre_assert(len2 > 0);
+            ahat_entries_scanned += (HYPRE_Real) len2;
 
 #ifdef ESSL
             for (j=0; j<len2; j++)
@@ -1096,6 +1103,8 @@ static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
             ahatp += len;
 #endif
         }
+        /* Graph ops: total A entries scanned during ahat gather */
+        local_graph_ops += ahat_entries_scanned;
 
         if (symmetric == 2)
         {
@@ -1135,6 +1144,8 @@ static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
         /* Reset marker array */
         for (i=0; i<len; i++)
             marker[ind[i]] = -1;
+        /* Graph ops: len marker resets */
+        local_graph_ops += (HYPRE_Real) len;
 
 #ifdef PARASAILS_DEBUG
         time0 = hypre_MPI_Wtime();
@@ -1172,6 +1183,12 @@ static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
         }
 #endif
 
+        /* Accumulate FMAs: (1/6)len^3 Cholesky + len^2 tri-solve
+         * + len scaling multiplies + 1 sqrt */
+        *flops += ((HYPRE_Real)len * (HYPRE_Real)len * (HYPRE_Real)len) / 6.0 +
+                  (HYPRE_Real)len * (HYPRE_Real)len +
+                  (HYPRE_Real)len + 1.0;
+
 #ifdef PARASAILS_DEBUG
         time1 = hypre_MPI_Wtime();
         timet += (time1 - time0);
@@ -1185,6 +1202,9 @@ static HYPRE_Int ComputeValuesSym(StoredRows *stored_rows, Matrix *mat,
 
     hypre_TFree(marker,HYPRE_MEMORY_HOST);
     hypre_TFree(ahat,HYPRE_MEMORY_HOST);
+
+    /* Accumulate graph ops */
+    *graph_ops += local_graph_ops;
 
 #ifdef PARASAILS_DEBUG
     {
@@ -1636,6 +1656,8 @@ ParaSails *ParaSailsCreate(MPI_Comm comm, HYPRE_Int beg_row, HYPRE_Int end_row, 
     ps->cost               = 0.0;
     ps->setup_pattern_time = 0.0;
     ps->setup_values_time  = 0.0;
+    ps->setup_flops        = 0.0;
+    ps->setup_graph_ops    = 0.0;
     ps->numb               = NULL;
     ps->M                  = NULL;
     ps->comm               = comm;
@@ -1786,6 +1808,10 @@ HYPRE_Int ParaSailsSetupValues(ParaSails *ps, Matrix *A, HYPRE_Real filter)
 
     time0 = hypre_MPI_Wtime();
 
+    /* Reset FLOP and graph ops counters */
+    ps->setup_flops = 0.0;
+    ps->setup_graph_ops = 0.0;
+
     /*
      * If the preconditioner matrix has its own numbering object, then we
      * assume it is in its own local numbering, and we change the numbering
@@ -1817,14 +1843,14 @@ HYPRE_Int ParaSailsSetupValues(ParaSails *ps, Matrix *A, HYPRE_Real filter)
     {
         error +=
           ComputeValuesSym(stored_rows, ps->M, load_bal->beg_row, ps->numb,
-            ps->symmetric);
+            ps->symmetric, &ps->setup_flops, &ps->setup_graph_ops);
 
         for (i=0; i<load_bal->num_taken; i++)
         {
             error += ComputeValuesSym(stored_rows,
                 load_bal->recip_data[i].mat,
                 load_bal->recip_data[i].mat->beg_row, ps->numb,
-                ps->symmetric);
+                ps->symmetric, &ps->setup_flops, &ps->setup_graph_ops);
         }
     }
     else
@@ -2072,4 +2098,22 @@ void ParaSailsStatsValues(ParaSails *ps, Matrix *A)
     hypre_TFree(setup_times,HYPRE_MEMORY_HOST);
 
     fflush(stdout);
+}
+
+/*--------------------------------------------------------------------------
+ * ParaSailsGetSetupFlops - Return the FLOPs accumulated during setup.
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Real ParaSailsGetSetupFlops(ParaSails *ps)
+{
+    return ps->setup_flops;
+}
+
+/*--------------------------------------------------------------------------
+ * ParaSailsGetSetupGraphOps - Return the graph ops accumulated during setup.
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Real ParaSailsGetSetupGraphOps(ParaSails *ps)
+{
+    return ps->setup_graph_ops;
 }

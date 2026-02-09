@@ -66,6 +66,10 @@ hypre_ParChebyCreate( void )
    hypre_ParChebyDataZtemp(cheby_data)         = NULL;
    hypre_ParChebyDataOwnsTemp(cheby_data)      = 0;
 
+   hypre_ParChebyDataSetupFlops(cheby_data)    = 0.0;
+   hypre_ParChebyDataSetupGraphOps(cheby_data) = 0.0;
+   hypre_ParChebyDataApplyFlops(cheby_data)    = 0.0;
+
    return cheby_data;
 }
 
@@ -571,6 +575,63 @@ hypre_ParChebySetTempVectors( hypre_ParChebyData  *cheby_data,
    hypre_ParChebyDataRtemp(cheby_data) = Rtemp;
    hypre_ParChebyDataVtemp(cheby_data) = Vtemp;
    hypre_ParChebyDataZtemp(cheby_data) = Ztemp;
+
+   return hypre_error_flag;
+}
+
+/*--------------------------------------------------------------------------
+ * hypre_ParChebyGetSetupFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_ParChebyGetSetupFlops( hypre_ParChebyData  *cheby_data,
+                             HYPRE_Real          *setup_flops )
+{
+   if (!cheby_data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+
+   *setup_flops = hypre_ParChebyDataSetupFlops(cheby_data);
+
+   return hypre_error_flag;
+}
+
+/*--------------------------------------------------------------------------
+ * hypre_ParChebyGetSetupGraphOps
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_ParChebyGetSetupGraphOps( hypre_ParChebyData  *cheby_data,
+                                HYPRE_Real          *setup_graph_ops )
+{
+   if (!cheby_data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+
+   *setup_graph_ops = hypre_ParChebyDataSetupGraphOps(cheby_data);
+
+   return hypre_error_flag;
+}
+
+/*--------------------------------------------------------------------------
+ * hypre_ParChebyGetApplyFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_ParChebyGetApplyFlops( hypre_ParChebyData  *cheby_data,
+                             HYPRE_Real          *apply_flops )
+{
+   if (!cheby_data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+
+   *apply_flops = hypre_ParChebyDataApplyFlops(cheby_data);
 
    return hypre_error_flag;
 }

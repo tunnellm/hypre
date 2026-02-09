@@ -113,6 +113,7 @@ hypre_BoomerAMGRelax( hypre_ParCSRMatrix *A,
                                      relax_weight, l1_norms, u, Vtemp);
          break;
 
+      case 21: /* L1 hybrid Symm. Gauss-Seidel (serial, same as 8) */
       case 8: /* L1 hybrid Symm. Gauss-Seidel */
       case 88: /* L1 hybrid Symm. Gauss-Seidel (with a convergent l1 term) */
          hypre_BoomerAMGRelax8HybridL1SSOR(A, f, cf_marker, relax_points,

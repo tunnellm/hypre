@@ -104,6 +104,59 @@ hypre_ParChebySetup( hypre_ParChebyData *cheby_data,
                                  &hypre_ParChebyDataCoefs(cheby_data),
                                  (scale) ? &hypre_ParVectorLocalData(scaling) : NULL);
 
+   /* Compute FLOP counts */
+   {
+      HYPRE_Int    local_num_rows = hypre_ParCSRMatrixNumRows(A);
+      HYPRE_Int    local_nnz      = hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A)) +
+                                    hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A));
+      HYPRE_Real   nnz_real       = (HYPRE_Real) local_nnz;
+      HYPRE_Real   n_real         = (HYPRE_Real) local_num_rows;
+
+      /* Setup FLOPs and graph ops: eigenvalue estimation */
+      if (eig_provided == 0.0)
+      {
+         if (eig_est > 0)
+         {
+            /* CG-based: eig_est iterations of matvec + 4 vector ops
+               Graph: nnz/2 (diag search, avg half-row scan) + n (abs in sqrt(abs(d))) */
+            hypre_ParChebyDataSetupFlops(cheby_data) = 3.0 * n_real
+               + (HYPRE_Real) eig_est * (nnz_real + 6.0 * n_real);
+            hypre_ParChebyDataSetupGraphOps(cheby_data) = 0.5 * nnz_real + n_real;
+         }
+         else
+         {
+            /* Gershgorin: (nnz-n) adds for off-diag, sub+add+2divs per row = nnz+3n numerical.
+               Graph: nnz (traversal/index access) + nnz (abs per entry) + n (abs(a_ii)) */
+            hypre_ParChebyDataSetupFlops(cheby_data) = nnz_real + 3.0 * n_real;
+            hypre_ParChebyDataSetupGraphOps(cheby_data) = 2.0 * nnz_real + n_real;
+         }
+      }
+      else
+      {
+         hypre_ParChebyDataSetupFlops(cheby_data) = 0.0;
+         hypre_ParChebyDataSetupGraphOps(cheby_data) = 0.0;
+      }
+
+      /* Scaling vector setup: sqrt+div per row, diagonal search nnz/2, abs per row (graph) */
+      if (scale)
+      {
+         hypre_ParChebyDataSetupFlops(cheby_data) += 2.0 * n_real;
+         hypre_ParChebyDataSetupGraphOps(cheby_data) += 0.5 * nnz_real + n_real;
+      }
+
+      /* Apply FLOPs per call: order iterations of matvec + vector ops */
+      if (scale)
+      {
+         /* With scaling: matvec + 3 vector ops per iteration */
+         hypre_ParChebyDataApplyFlops(cheby_data) = (HYPRE_Real) order * (nnz_real + 3.0 * n_real);
+      }
+      else
+      {
+         /* No scaling: matvec + 1 vector op per iteration */
+         hypre_ParChebyDataApplyFlops(cheby_data) = (HYPRE_Real) order * (nnz_real + n_real);
+      }
+   }
+
    HYPRE_ANNOTATE_FUNC_END;
 
    return hypre_error_flag;

@@ -138,7 +138,9 @@ hypre_FindKapGrad( hypre_CSRMatrix  *A_diag,
                    HYPRE_Int         patt_size,
                    HYPRE_Int         max_row_size,
                    HYPRE_Int         row_num,
-                   HYPRE_Int        *kg_marker )
+                   HYPRE_Int        *kg_marker,
+                   HYPRE_Real       *flops,
+                   HYPRE_Real       *graph_ops )
 {
    HYPRE_UNUSED_VAR(max_row_size);
 
@@ -150,6 +152,7 @@ hypre_FindKapGrad( hypre_CSRMatrix  *A_diag,
 
    /* Local Variables */
    HYPRE_Int       i, ii, j, k, count, col;
+   HYPRE_Int       mult_count = 0;
 
    count = 0;
 
@@ -187,14 +190,29 @@ hypre_FindKapGrad( hypre_CSRMatrix  *A_diag,
                kg_pos[count] = col;
                kap_grad_data[count] = G_temp_data[i] * A_a[j];
                count++;
+               mult_count++;
             }
             else if (k > 0)
             {
                /* Already existing entry in the tentative pattern */
                kap_grad_data[k - 1] += G_temp_data[i] * A_a[j];
+               mult_count++;
             }
          }
       }
+   }
+
+   /* Accumulate FLOP count */
+   if (flops)
+   {
+      *flops += (HYPRE_Real) mult_count;
+   }
+
+   /* Accumulate graph ops: 2 integer assignments per new gradient entry
+    * (kg_marker update + kg_pos store) in both Loop 1 and Loop 2 */
+   if (graph_ops)
+   {
+      *graph_ops += 2.0 * (HYPRE_Real) count;
    }
 
    /* Update number of nonzero coefficients held in kap_grad */
@@ -434,6 +452,11 @@ hypre_FSAISetupNative( void               *fsai_vdata,
    /* Local variables */
    char                    msg[512];    /* Warning message */
    HYPRE_Int              *twspace;     /* shared work space for omp threads */
+   HYPRE_Real             *flops_space; /* shared flop accumulator for omp threads */
+   HYPRE_Real             *graph_space; /* shared graph ops accumulator for omp threads */
+   HYPRE_Real              total_flops; /* total FLOPs accumulated */
+   HYPRE_Real              total_graph_ops; /* total graph ops accumulated */
+   HYPRE_Int               i;           /* Loop variable for FLOP accumulation */
 
    /* Initalize some variables */
    max_nnzrow_diag_G = max_steps * max_step_size + 1;
@@ -445,6 +468,8 @@ hypre_FSAISetupNative( void               *fsai_vdata,
 
    /* Allocate shared work space array for OpenMP threads */
    twspace = hypre_CTAlloc(HYPRE_Int, hypre_NumThreads() + 1, HYPRE_MEMORY_HOST);
+   flops_space = hypre_CTAlloc(HYPRE_Real, hypre_NumThreads(), HYPRE_MEMORY_HOST);
+   graph_space = hypre_CTAlloc(HYPRE_Real, hypre_NumThreads(), HYPRE_MEMORY_HOST);
 
    /**********************************************************************
    * Start of Adaptive FSAI algorithm
@@ -475,6 +500,8 @@ hypre_FSAISetupNative( void               *fsai_vdata,
       HYPRE_Complex   row_scale;     /* Scaling factor for G_temp */
       HYPRE_Complex  *G_temp_data;
       HYPRE_Complex  *A_subrow_data;
+      HYPRE_Real      local_flops;   /* Thread-local FLOP accumulator */
+      HYPRE_Real      local_graph_ops; /* Thread-local graph ops accumulator */
 
       HYPRE_Int       num_rows_Gloc;
       HYPRE_Int       num_nnzs_Gloc;
@@ -501,6 +528,10 @@ hypre_FSAISetupNative( void               *fsai_vdata,
       /* Setting data variables for vectors */
       G_temp_data   = hypre_VectorData(G_temp);
       A_subrow_data = hypre_VectorData(A_subrow);
+
+      /* Initialize FLOP and graph ops counters */
+      local_flops = 0.0;
+      local_graph_ops = 0.0;
 
       ii = hypre_GetThreadNum();
       num_threads = hypre_NumActiveThreads();
@@ -534,13 +565,24 @@ hypre_FSAISetupNative( void               *fsai_vdata,
          {
             /* Compute Kaporin Gradient */
             hypre_FindKapGrad(A_diag, kap_grad, kg_pos, G_temp, pattern,
-                              patt_size, max_nnzrow_diag_G, i, kg_marker);
+                              patt_size, max_nnzrow_diag_G, i, kg_marker, &local_flops,
+                              &local_graph_ops);
 
             /* Find max_step_size largest values of the kaporin gradient,
                find their column indices, and add it to pattern */
             patt_size_old = patt_size;
-            hypre_AddToPattern(kap_grad, kg_pos, pattern, &patt_size,
-                               kg_marker, max_step_size);
+            {
+               HYPRE_Int kap_grad_size = hypre_VectorSize(kap_grad);
+               HYPRE_Int nentries = hypre_min(kap_grad_size, max_step_size);
+               hypre_AddToPattern(kap_grad, kg_pos, pattern, &patt_size,
+                                  kg_marker, max_step_size);
+               /* AddToPattern graph ops: 2*nentries (partial sort swaps) +
+                * nentries (pattern store) + kap_grad_size - nentries (marker resets) +
+                * patt_size*log2(patt_size) (qsort) */
+               local_graph_ops += 2.0 * (HYPRE_Real) nentries
+                                + (HYPRE_Real) kap_grad_size
+                                + (patt_size > 1 ? (HYPRE_Real) patt_size * log2((double) patt_size) : 0.0);
+            }
 
             /* Update sizes */
             hypre_VectorSize(A_sub)    = patt_size * patt_size;
@@ -559,8 +601,24 @@ hypre_FSAISetupNative( void               *fsai_vdata,
                {
                   marker[pattern[j]] = j;
                }
+               /* Graph ops: patt_size marker assignments */
+               local_graph_ops += (HYPRE_Real) patt_size;
+
                hypre_CSRMatrixExtractDenseMat(A_diag, A_sub, pattern, patt_size, marker);
                hypre_CSRMatrixExtractDenseRow(A_diag, A_subrow, marker, i);
+
+               /* Graph ops: entries scanned during dense extraction
+                * ExtractDenseMat scans A rows for each pattern entry,
+                * ExtractDenseRow scans A[i,:] */
+               {
+                  HYPRE_Int extract_scanned = A_i[i + 1] - A_i[i];
+                  HYPRE_Int jj;
+                  for (jj = 0; jj < patt_size; jj++)
+                  {
+                     extract_scanned += A_i[pattern[jj] + 1] - A_i[pattern[jj]];
+                  }
+                  local_graph_ops += (HYPRE_Real) extract_scanned;
+               }
 
                /* Solve A[P, P] G[i, P]' = -A[i, P] */
                hypre_DenseSPDSystemSolve(A_sub, A_subrow, G_temp);
@@ -570,6 +628,12 @@ hypre_FSAISetupNative( void               *fsai_vdata,
                for (j = 0; j < patt_size; j++)
                {
                   new_psi += G_temp_data[j] * A_subrow_data[j];
+               }
+
+               /* Accumulate FMAs: Cholesky (1/6)p^3 + tri-solve p^2 + psi dot p */
+               {
+                  HYPRE_Real p = (HYPRE_Real) patt_size;
+                  local_flops += (p * p * p) / 6.0 + p * p + p;
                }
 
                /* Check psi reduction */
@@ -589,6 +653,8 @@ hypre_FSAISetupNative( void               *fsai_vdata,
          {
             marker[pattern[j]] = -1;
          }
+         /* Graph ops: patt_size marker resets */
+         local_graph_ops += (HYPRE_Real) patt_size;
 
          /* Compute scaling factor */
          if (hypre_creal(new_psi) > 0 && hypre_cimag(new_psi) == 0)
@@ -615,11 +681,15 @@ hypre_FSAISetupNative( void               *fsai_vdata,
             Gloc_a[j] = row_scale * G_temp_data[k];
             kg_marker[pattern[k]] = 0;
          }
+         /* Graph ops: 2*patt_size (Gloc_j store + kg_marker reset per entry) */
+         local_graph_ops += 2.0 * (HYPRE_Real) patt_size;
          Gloc_i[iloc + 1] = Gloc_i[iloc] + k + 1;
       }
 
       /* Copy data to shared memory */
       twspace[ii + 1] = Gloc_i[num_rows_Gloc] - Gloc_i[0];
+      flops_space[ii] = local_flops;
+      graph_space[ii] = local_graph_ops;
 #ifdef HYPRE_USING_OPENMP
       #pragma omp barrier
       #pragma omp single
@@ -668,8 +738,26 @@ hypre_FSAISetupNative( void               *fsai_vdata,
    } /* end openmp region */
    HYPRE_ANNOTATE_REGION_END("%s", "MainLoop");
 
+   /* Accumulate FLOPs from all threads */
+   total_flops = 0.0;
+   for (i = 0; i < hypre_NumThreads(); i++)
+   {
+      total_flops += flops_space[i];
+   }
+   hypre_ParFSAIDataSetupFlops(fsai_data) = total_flops;
+
+   /* Accumulate graph ops from all threads */
+   total_graph_ops = 0.0;
+   for (i = 0; i < hypre_NumThreads(); i++)
+   {
+      total_graph_ops += graph_space[i];
+   }
+   hypre_ParFSAIDataSetupGraphOps(fsai_data) = total_graph_ops;
+
    /* Free memory */
    hypre_TFree(twspace, HYPRE_MEMORY_HOST);
+   hypre_TFree(flops_space, HYPRE_MEMORY_HOST);
+   hypre_TFree(graph_space, HYPRE_MEMORY_HOST);
 
    /* Update local number of nonzeros of G */
    hypre_CSRMatrixNumNonzeros(G_diag) = G_i[num_rows_diag_A];
@@ -715,6 +803,10 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
    HYPRE_Int               i, j, jj;
    char                    msg[512];    /* Warning message */
    HYPRE_Complex          *twspace;     /* shared work space for omp threads */
+   HYPRE_Real             *flops_space; /* shared flop accumulator for omp threads */
+   HYPRE_Real             *graph_space; /* shared graph ops accumulator for omp threads */
+   HYPRE_Real              total_flops; /* total FLOPs accumulated */
+   HYPRE_Real              total_graph_ops; /* total graph ops accumulated */
 
    /* Initalize some variables */
    max_nnzrow_diag_G = max_steps * max_step_size + 1;
@@ -727,6 +819,8 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
 
    /* Allocate shared work space array for OpenMP threads */
    twspace = hypre_CTAlloc(HYPRE_Complex, hypre_NumThreads() + 1, HYPRE_MEMORY_HOST);
+   flops_space = hypre_CTAlloc(HYPRE_Real, hypre_NumThreads(), HYPRE_MEMORY_HOST);
+   graph_space = hypre_CTAlloc(HYPRE_Real, hypre_NumThreads(), HYPRE_MEMORY_HOST);
 
    /**********************************************************************
    * Start of Adaptive FSAI algorithm
@@ -754,6 +848,9 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
       HYPRE_Complex   row_scale;     /* Scaling factor for G_temp */
       HYPRE_Complex  *G_temp_data;
       HYPRE_Complex  *A_subrow_data;
+      HYPRE_Real      local_flops;   /* Thread-local FLOP accumulator */
+      HYPRE_Real      local_graph_ops; /* Thread-local graph ops accumulator */
+      HYPRE_Int       ii;            /* Thread identifier */
 
       /* Allocate and initialize local vector variables */
       G_temp    = hypre_SeqVectorCreate(max_nnzrow_diag_G);
@@ -775,6 +872,11 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
       G_temp_data   = hypre_VectorData(G_temp);
       A_subrow_data = hypre_VectorData(A_subrow);
 
+      /* Initialize FLOP and graph ops counters and get thread ID */
+      local_flops = 0.0;
+      local_graph_ops = 0.0;
+      ii = hypre_GetThreadNum();
+
 #ifdef HYPRE_USING_OPENMP
       #pragma omp for schedule(dynamic)
 #endif
@@ -790,13 +892,24 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
          {
             /* Compute Kaporin Gradient */
             hypre_FindKapGrad(A_diag, kap_grad, kg_pos, G_temp, pattern,
-                              patt_size, max_nnzrow_diag_G, i, kg_marker);
+                              patt_size, max_nnzrow_diag_G, i, kg_marker, &local_flops,
+                              &local_graph_ops);
 
             /* Find max_step_size largest values of the kaporin gradient,
                find their column indices, and add it to pattern */
             patt_size_old = patt_size;
-            hypre_AddToPattern(kap_grad, kg_pos, pattern, &patt_size,
-                               kg_marker, max_step_size);
+            {
+               HYPRE_Int kap_grad_size = hypre_VectorSize(kap_grad);
+               HYPRE_Int nentries = hypre_min(kap_grad_size, max_step_size);
+               hypre_AddToPattern(kap_grad, kg_pos, pattern, &patt_size,
+                                  kg_marker, max_step_size);
+               /* AddToPattern graph ops: 2*nentries (partial sort swaps) +
+                * nentries (pattern store) + kap_grad_size - nentries (marker resets) +
+                * patt_size*log2(patt_size) (qsort) */
+               local_graph_ops += 2.0 * (HYPRE_Real) nentries
+                                + (HYPRE_Real) kap_grad_size
+                                + (patt_size > 1 ? (HYPRE_Real) patt_size * log2((double) patt_size) : 0.0);
+            }
 
             /* Update sizes */
             hypre_VectorSize(A_sub)    = patt_size * patt_size;
@@ -815,8 +928,24 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
                {
                   marker[pattern[j]] = j;
                }
+               /* Graph ops: patt_size marker assignments */
+               local_graph_ops += (HYPRE_Real) patt_size;
+
                hypre_CSRMatrixExtractDenseMat(A_diag, A_sub, pattern, patt_size, marker);
                hypre_CSRMatrixExtractDenseRow(A_diag, A_subrow, marker, i);
+
+               /* Graph ops: entries scanned during dense extraction
+                * ExtractDenseMat scans A rows for each pattern entry,
+                * ExtractDenseRow scans A[i,:] */
+               {
+                  HYPRE_Int extract_scanned = A_i[i + 1] - A_i[i];
+                  HYPRE_Int jj;
+                  for (jj = 0; jj < patt_size; jj++)
+                  {
+                     extract_scanned += A_i[pattern[jj] + 1] - A_i[pattern[jj]];
+                  }
+                  local_graph_ops += (HYPRE_Real) extract_scanned;
+               }
 
                /* Solve A[P, P] G[i, P]' = -A[i, P] */
                hypre_DenseSPDSystemSolve(A_sub, A_subrow, G_temp);
@@ -826,6 +955,12 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
                for (j = 0; j < patt_size; j++)
                {
                   new_psi += G_temp_data[j] * A_subrow_data[j];
+               }
+
+               /* Accumulate FMAs: Cholesky (1/6)p^3 + tri-solve p^2 + psi dot p */
+               {
+                  HYPRE_Real p = (HYPRE_Real) patt_size;
+                  local_flops += (p * p * p) / 6.0 + p * p + p;
                }
 
                /* Check psi reduction */
@@ -845,6 +980,8 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
          {
             marker[pattern[j]] = -1;
          }
+         /* Graph ops: patt_size marker resets */
+         local_graph_ops += (HYPRE_Real) patt_size;
 
          /* Compute scaling factor */
          if (hypre_creal(new_psi) > 0 && hypre_cimag(new_psi) == 0)
@@ -871,8 +1008,14 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
             G_a[j++] = row_scale * G_temp_data[k];
             kg_marker[pattern[k]] = 0;
          }
+         /* Graph ops: 2*patt_size (G_j store + kg_marker reset per entry) */
+         local_graph_ops += 2.0 * (HYPRE_Real) patt_size;
          G_nnzcnt[i] = patt_size + 1;
       } /* omp for schedule(dynamic) */
+
+      /* Store thread-local FLOPs and graph ops */
+      flops_space[ii] = local_flops;
+      graph_space[ii] = local_graph_ops;
 
       /* Free memory */
       hypre_SeqVectorDestroy(G_temp);
@@ -885,6 +1028,22 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
       hypre_TFree(kg_marker, HYPRE_MEMORY_HOST);
    } /* end openmp region */
    HYPRE_ANNOTATE_REGION_END("%s", "MainLoop");
+
+   /* Accumulate FLOPs from all threads */
+   total_flops = 0.0;
+   for (i = 0; i < hypre_NumThreads(); i++)
+   {
+      total_flops += flops_space[i];
+   }
+   hypre_ParFSAIDataSetupFlops(fsai_data) = total_flops;
+
+   /* Accumulate graph ops from all threads */
+   total_graph_ops = 0.0;
+   for (i = 0; i < hypre_NumThreads(); i++)
+   {
+      total_graph_ops += graph_space[i];
+   }
+   hypre_ParFSAIDataSetupGraphOps(fsai_data) = total_graph_ops;
 
    /* Reorder array */
    G_i[0] = 0;
@@ -901,6 +1060,8 @@ hypre_FSAISetupOMPDyn( void               *fsai_vdata,
 
    /* Free memory */
    hypre_TFree(twspace, HYPRE_MEMORY_HOST);
+   hypre_TFree(flops_space, HYPRE_MEMORY_HOST);
+   hypre_TFree(graph_space, HYPRE_MEMORY_HOST);
    hypre_TFree(G_nnzcnt, HYPRE_MEMORY_HOST);
 
    /* Update local number of nonzeros of G */

@@ -41,6 +41,9 @@ HYPRE_Int hypre_ParaSailsSetupValues(hypre_ParaSails obj,
 HYPRE_Int hypre_ParaSailsApply(hypre_ParaSails ps, HYPRE_Real *u, HYPRE_Real *v);
 HYPRE_Int hypre_ParaSailsApplyTrans(hypre_ParaSails ps, HYPRE_Real *u, HYPRE_Real *v);
 HYPRE_Int hypre_ParaSailsBuildIJMatrix(hypre_ParaSails obj, HYPRE_IJMatrix *pij_A);
+HYPRE_Int hypre_ParaSailsGetSetupFlops(hypre_ParaSails obj, HYPRE_Real *setup_flops);
+HYPRE_Int hypre_ParaSailsGetSetupGraphOps(hypre_ParaSails obj, HYPRE_Real *setup_graph_ops);
+HYPRE_Int hypre_ParaSailsGetNnzM(hypre_ParaSails obj, HYPRE_Int *nnz_M);
 
 #ifdef __cplusplus
 }

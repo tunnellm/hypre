@@ -921,3 +921,25 @@ HYPRE_ParaSailsBuildIJMatrix(HYPRE_Solver solver, HYPRE_IJMatrix *pij_A)
    return hypre_error_flag;
 #endif
 }
+
+/*--------------------------------------------------------------------------
+ * HYPRE_ParaSailsGetSetupFlops -
+ *--------------------------------------------------------------------------*/
+HYPRE_Int
+HYPRE_ParaSailsGetSetupFlops(HYPRE_Solver solver, HYPRE_Real *setup_flops)
+{
+#ifdef HYPRE_MIXEDINT
+   HYPRE_UNUSED_VAR(solver);
+   HYPRE_UNUSED_VAR(setup_flops);
+
+   hypre_error_w_msg(HYPRE_ERROR_GENERIC, "ParaSails not usable in mixedint mode!");
+   return hypre_error_flag;
+#else
+
+   Secret *secret = (Secret *) solver;
+
+   hypre_ParaSailsGetSetupFlops(secret->obj, setup_flops);
+
+   return hypre_error_flag;
+#endif
+}

@@ -42,6 +42,8 @@ typedef struct
     HYPRE_Real cost;          /* cost for this processor */
     HYPRE_Real setup_pattern_time;
     HYPRE_Real setup_values_time;
+    HYPRE_Real setup_flops;   /* FLOPs accumulated during setup */
+    HYPRE_Real setup_graph_ops; /* Graph ops accumulated during setup */
 
     Numbering *numb;
     Matrix    *M;             /* preconditioner */
@@ -65,6 +67,8 @@ void ParaSailsApply(ParaSails *ps, HYPRE_Real *u, HYPRE_Real *v);
 void ParaSailsApplyTrans(ParaSails *ps, HYPRE_Real *u, HYPRE_Real *v);
 HYPRE_Real ParaSailsStatsPattern(ParaSails *ps, Matrix *A);
 void ParaSailsStatsValues(ParaSails *ps, Matrix *A);
+HYPRE_Real ParaSailsGetSetupFlops(ParaSails *ps);
+HYPRE_Real ParaSailsGetSetupGraphOps(ParaSails *ps);
 
 #ifdef __cplusplus
 }

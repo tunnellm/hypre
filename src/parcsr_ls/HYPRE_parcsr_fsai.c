@@ -373,3 +373,14 @@ HYPRE_FSAIGetPrintLevel( HYPRE_Solver  solver,
 {
    return ( hypre_FSAIGetPrintLevel( (void *) solver, print_level ) );
 }
+
+/*--------------------------------------------------------------------------
+ * HYPRE_FSAIGetSetupFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_FSAIGetSetupFlops( HYPRE_Solver  solver,
+                         HYPRE_Real   *setup_flops )
+{
+   return ( hypre_FSAIGetSetupFlops( (void *) solver, setup_flops ) );
+}

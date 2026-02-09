@@ -513,6 +513,8 @@ HYPRE_Int hypre_BoomerAMGSetFPoints( void *data, HYPRE_Int isolated, HYPRE_Int n
                                      HYPRE_BigInt *indices );
 HYPRE_Int hypre_BoomerAMGSetCumNnzAP ( void *data, HYPRE_Real cum_nnz_AP );
 HYPRE_Int hypre_BoomerAMGGetCumNnzAP ( void *data, HYPRE_Real *cum_nnz_AP );
+HYPRE_Int hypre_BoomerAMGGetSetupFlops ( void *data, HYPRE_Real *setup_flops );
+HYPRE_Int hypre_BoomerAMGGetSolveFlops ( void *data, HYPRE_Real *solve_flops );
 
 /* par_amg_setup.c */
 HYPRE_Int hypre_BoomerAMGSetup ( void *amg_vdata, hypre_ParCSRMatrix *A, hypre_ParVector *f,
@@ -584,6 +586,9 @@ HYPRE_Int hypre_ParChebyGetMinMaxEigEst( hypre_ParChebyData *cheby_data,
 HYPRE_Int hypre_ParChebySetTempVectors( hypre_ParChebyData *cheby_data,
                                         hypre_ParVector *Ptemp, hypre_ParVector *Rtemp,
                                         hypre_ParVector *Vtemp, hypre_ParVector *Ztemp );
+HYPRE_Int hypre_ParChebyGetSetupFlops( hypre_ParChebyData *cheby_data, HYPRE_Real *setup_flops );
+HYPRE_Int hypre_ParChebyGetSetupGraphOps( hypre_ParChebyData *cheby_data, HYPRE_Real *setup_graph_ops );
+HYPRE_Int hypre_ParChebyGetApplyFlops( hypre_ParChebyData *cheby_data, HYPRE_Real *apply_flops );
 
 /* par_cheby_setup.c */
 HYPRE_Int hypre_ParChebySetup( hypre_ParChebyData *cheby_data, hypre_ParCSRMatrix *A,
@@ -627,6 +632,7 @@ HYPRE_Int hypre_BoomerAMGCoarsenPMIS ( hypre_ParCSRMatrix *S, hypre_ParCSRMatrix
                                        HYPRE_Int CF_init, HYPRE_Int debug_flag, hypre_IntArray **CF_marker_ptr );
 HYPRE_Int hypre_BoomerAMGCoarsenPMISHost ( hypre_ParCSRMatrix *S, hypre_ParCSRMatrix *A,
                                            HYPRE_Int CF_init, HYPRE_Int debug_flag, hypre_IntArray **CF_marker_ptr );
+HYPRE_Int hypre_BoomerAMGCoarsenPMISNumIters ( void );
 
 HYPRE_Int hypre_BoomerAMGCoarsenPMISDevice( hypre_ParCSRMatrix *S, hypre_ParCSRMatrix *A,
                                             HYPRE_Int CF_init, HYPRE_Int debug_flag, hypre_IntArray **CF_marker_ptr );
@@ -924,11 +930,11 @@ HYPRE_Int hypre_GenerateMultiPiDevice ( hypre_ParCSRMatrix *A, hypre_ParCSRMatri
 HYPRE_Int hypre_BoomerAMGBuildMultipass ( hypre_ParCSRMatrix *A, HYPRE_Int *CF_marker,
                                           hypre_ParCSRMatrix *S, HYPRE_BigInt *num_cpts_global, HYPRE_Int num_functions, HYPRE_Int *dof_func,
                                           HYPRE_Int debug_flag, HYPRE_Real trunc_factor, HYPRE_Int P_max_elmts, HYPRE_Int weight_option,
-                                          hypre_ParCSRMatrix **P_ptr );
+                                          HYPRE_Int *num_passes_ptr, hypre_ParCSRMatrix **P_ptr );
 HYPRE_Int hypre_BoomerAMGBuildMultipassHost ( hypre_ParCSRMatrix *A, HYPRE_Int *CF_marker,
                                               hypre_ParCSRMatrix *S, HYPRE_BigInt *num_cpts_global, HYPRE_Int num_functions, HYPRE_Int *dof_func,
                                               HYPRE_Int debug_flag, HYPRE_Real trunc_factor, HYPRE_Int P_max_elmts, HYPRE_Int weight_option,
-                                              hypre_ParCSRMatrix **P_ptr );
+                                              HYPRE_Int *num_passes_ptr, hypre_ParCSRMatrix **P_ptr );
 
 /* par_nodal_systems.c */
 HYPRE_Int hypre_BoomerAMGCreateNodalA ( hypre_ParCSRMatrix *A, HYPRE_Int num_functions,
@@ -2150,6 +2156,7 @@ HYPRE_Int hypre_FSAIGetOmega ( void *data, HYPRE_Real *omega );
 HYPRE_Int hypre_FSAIGetLogging ( void *data, HYPRE_Int *logging );
 HYPRE_Int hypre_FSAIGetNumIterations ( void *data, HYPRE_Int *num_iterations );
 HYPRE_Int hypre_FSAIGetPrintLevel ( void *data, HYPRE_Int *print_level );
+HYPRE_Int hypre_FSAIGetSetupFlops ( void *data, HYPRE_Real *setup_flops );
 
 /* par_fsai_setup.c */
 HYPRE_Int hypre_CSRMatrixExtractDenseMat ( hypre_CSRMatrix *A, hypre_Vector *A_sub,
@@ -2160,7 +2167,8 @@ HYPRE_Int hypre_CSRMatrixExtractDenseRow ( hypre_CSRMatrix *A, hypre_Vector *A_s
 HYPRE_Int hypre_FindKapGrad ( hypre_CSRMatrix *A_diag, hypre_Vector *kaporin_gradient,
                               HYPRE_Int *kap_grad_nonzeros, hypre_Vector *G_temp,
                               HYPRE_Int *S_Pattern, HYPRE_Int S_nnz,
-                              HYPRE_Int max_row_size, HYPRE_Int row_num, HYPRE_Int *kg_marker );
+                              HYPRE_Int max_row_size, HYPRE_Int row_num, HYPRE_Int *kg_marker,
+                              HYPRE_Real *flops, HYPRE_Real *graph_ops );
 HYPRE_Int hypre_AddToPattern ( hypre_Vector *kaporin_gradient, HYPRE_Int *kap_grad_nonzeros,
                                HYPRE_Int *S_Pattern, HYPRE_Int *S_nnz, HYPRE_Int *kg_marker,
                                HYPRE_Int max_step_size );

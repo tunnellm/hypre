@@ -817,6 +817,24 @@ HYPRE_BoomerAMGGetCumNnzAP( HYPRE_Solver solver, void *cum_nnz_AP )
 /*--------------------------------------------------------------------------*/
 
 HYPRE_Int
+HYPRE_BoomerAMGGetSetupFlops( HYPRE_Solver solver, void *setup_flops )
+{
+   HYPRE_Precision precision = hypre_GlobalPrecision();
+   return HYPRE_BoomerAMGGetSetupFlops_pre( precision, solver, setup_flops );
+}
+
+/*--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_BoomerAMGGetSolveFlops( HYPRE_Solver solver, void *solve_flops )
+{
+   HYPRE_Precision precision = hypre_GlobalPrecision();
+   return HYPRE_BoomerAMGGetSolveFlops_pre( precision, solver, solve_flops );
+}
+
+/*--------------------------------------------------------------------------*/
+
+HYPRE_Int
 HYPRE_BoomerAMGGetCumNumIterations( HYPRE_Solver solver, HYPRE_Int *cum_num_iterations )
 {
    HYPRE_Precision precision = hypre_GlobalPrecision();
