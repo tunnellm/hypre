@@ -2310,6 +2310,20 @@ HYPRE_Int
 hypre_BoomerAMGGetCumNnzAP_long_dbl( void *data, hypre_long_double *cum_nnz_AP );
 
 HYPRE_Int
+hypre_BoomerAMGGetSetupFlops_flt( void *data, hypre_float *setup_flops );
+HYPRE_Int
+hypre_BoomerAMGGetSetupFlops_dbl( void *data, hypre_double *setup_flops );
+HYPRE_Int
+hypre_BoomerAMGGetSetupFlops_long_dbl( void *data, hypre_long_double *setup_flops );
+
+HYPRE_Int
+hypre_BoomerAMGGetSolveFlops_flt( void *data, hypre_float *solve_flops );
+HYPRE_Int
+hypre_BoomerAMGGetSolveFlops_dbl( void *data, hypre_double *solve_flops );
+HYPRE_Int
+hypre_BoomerAMGGetSolveFlops_long_dbl( void *data, hypre_long_double *solve_flops );
+
+HYPRE_Int
 hypre_BoomerAMGGetCumNumIterations_flt( void *data, HYPRE_Int *cum_num_iterations );
 HYPRE_Int
 hypre_BoomerAMGGetCumNumIterations_dbl( void *data, HYPRE_Int *cum_num_iterations );

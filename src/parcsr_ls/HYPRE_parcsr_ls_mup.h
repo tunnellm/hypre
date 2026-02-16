@@ -889,6 +889,24 @@ HYPRE_Int
 HYPRE_BoomerAMGGetCumNnzAP( HYPRE_Solver solver, void *cum_nnz_AP );
 
 HYPRE_Int
+HYPRE_BoomerAMGGetSetupFlops_flt( HYPRE_Solver solver, hypre_float *setup_flops );
+HYPRE_Int
+HYPRE_BoomerAMGGetSetupFlops_dbl( HYPRE_Solver solver, hypre_double *setup_flops );
+HYPRE_Int
+HYPRE_BoomerAMGGetSetupFlops_long_dbl( HYPRE_Solver solver, hypre_long_double *setup_flops );
+HYPRE_Int
+HYPRE_BoomerAMGGetSetupFlops( HYPRE_Solver solver, void *setup_flops );
+
+HYPRE_Int
+HYPRE_BoomerAMGGetSolveFlops_flt( HYPRE_Solver solver, hypre_float *solve_flops );
+HYPRE_Int
+HYPRE_BoomerAMGGetSolveFlops_dbl( HYPRE_Solver solver, hypre_double *solve_flops );
+HYPRE_Int
+HYPRE_BoomerAMGGetSolveFlops_long_dbl( HYPRE_Solver solver, hypre_long_double *solve_flops );
+HYPRE_Int
+HYPRE_BoomerAMGGetSolveFlops( HYPRE_Solver solver, void *solve_flops );
+
+HYPRE_Int
 HYPRE_BoomerAMGGetCumNumIterations_flt( HYPRE_Solver solver, HYPRE_Int *cum_num_iterations );
 HYPRE_Int
 HYPRE_BoomerAMGGetCumNumIterations_dbl( HYPRE_Solver solver, HYPRE_Int *cum_num_iterations );
@@ -6151,6 +6169,12 @@ HYPRE_BoomerAMGGetConvergeType_pre( HYPRE_Precision precision, HYPRE_Solver solv
 
 HYPRE_Int
 HYPRE_BoomerAMGGetCumNnzAP_pre( HYPRE_Precision precision, HYPRE_Solver solver, void *cum_nnz_AP );
+
+HYPRE_Int
+HYPRE_BoomerAMGGetSetupFlops_pre( HYPRE_Precision precision, HYPRE_Solver solver, void *setup_flops );
+
+HYPRE_Int
+HYPRE_BoomerAMGGetSolveFlops_pre( HYPRE_Precision precision, HYPRE_Solver solver, void *solve_flops );
 
 HYPRE_Int
 HYPRE_BoomerAMGGetCumNumIterations_pre( HYPRE_Precision precision, HYPRE_Solver solver, HYPRE_Int *cum_num_iterations );

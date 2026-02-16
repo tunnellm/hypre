@@ -105,6 +105,10 @@ hypre_ILUCreate( void )
    /* reordering_type default to use local RCM */
    hypre_ParILUDataReorderingType(ilu_data)               = 1;
 
+   /* FLOP and graph op counting */
+   hypre_ParILUDataSetupFlops(ilu_data)                   = 0.0;
+   hypre_ParILUDataSetupGraphOps(ilu_data)                = 0.0;
+
    /* see hypre_ILUSetType for more default values */
    hypre_ParILUDataTestOption(ilu_data)                   = 0;
 

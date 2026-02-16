@@ -57,6 +57,10 @@ hypre_SchwarzCreate( void )
    hypre_SchwarzDataVtemp(schwarz_data) = NULL;
    hypre_SchwarzDataDofFunc(schwarz_data) = NULL;
 
+   /* FLOP and graph op counting */
+   hypre_SchwarzDataSetupFlops(schwarz_data) = 0.0;
+   hypre_SchwarzDataSetupGraphOps(schwarz_data) = 0.0;
+
    return (void *) schwarz_data;
 }
 
@@ -179,6 +183,37 @@ hypre_SchwarzSetup(void               *schwarz_vdata,
 
    hypre_SchwarzDataDomainStructure(schwarz_data) = domain_structure;
    hypre_SchwarzDataPivots(schwarz_data) = pivots;
+
+   /* Initialize FLOP and graph op counts for Schwarz setup.
+    * Basic estimates are set here; more detailed calculations are done
+    * in par_amg_setup.c when Schwarz is used as an AMG smoother.
+    * Factorization: ~(1/3)*sum(domain_size^3) for LU
+    * Graph: domain construction traverses A's sparsity pattern
+    */
+   if (domain_structure)
+   {
+      HYPRE_Int num_domains = hypre_CSRMatrixNumRows(domain_structure);
+      HYPRE_Int *domain_i = hypre_CSRMatrixI(domain_structure);
+      HYPRE_Real setup_flops = 0.0;
+      HYPRE_Int d;
+
+      /* For each domain, LU factorization costs ~domain_size^3/3 FLOPs */
+      for (d = 0; d < num_domains; d++)
+      {
+         HYPRE_Real domain_size = (HYPRE_Real)(domain_i[d + 1] - domain_i[d]);
+         setup_flops += domain_size * domain_size * domain_size / 3.0;
+      }
+
+      hypre_SchwarzDataSetupFlops(schwarz_data) = setup_flops;
+      /* Graph ops: basic estimate, refined by AMG setup when used as smoother */
+      hypre_SchwarzDataSetupGraphOps(schwarz_data) =
+         (HYPRE_Real) hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A));
+   }
+   else
+   {
+      hypre_SchwarzDataSetupFlops(schwarz_data) = 0.0;
+      hypre_SchwarzDataSetupGraphOps(schwarz_data) = 0.0;
+   }
 
    return hypre_error_flag;
 

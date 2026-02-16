@@ -10,6 +10,8 @@
 #include "par_amg.h"
 #include "_hypre_parcsr_block_mv.h"
 #include "_hypre_utilities.hpp"
+#include "../distributed_ls/ParaSails/_hypre_ParaSails.h"
+#include "schwarz.h"
 
 #define DEBUG 0
 #define PRINT_CF 0
@@ -707,6 +709,18 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       CF_marker_array = hypre_CTAlloc(hypre_IntArray*, max_levels, HYPRE_MEMORY_HOST);
    }
 
+   /* Allocate array to store multipass counts per level */
+   if (hypre_ParAMGDataInterpNumPasses(amg_data) == NULL)
+   {
+      hypre_ParAMGDataInterpNumPasses(amg_data) = hypre_CTAlloc(HYPRE_Int, max_levels, HYPRE_MEMORY_HOST);
+   }
+
+   /* Allocate array to store nnz(S_FF) per level for FLOP counting */
+   if (hypre_ParAMGDataNnzSFF(amg_data) == NULL)
+   {
+      hypre_ParAMGDataNnzSFF(amg_data) = hypre_CTAlloc(HYPRE_BigInt, max_levels, HYPRE_MEMORY_HOST);
+   }
+
    if (num_C_points_coarse > 0)
    {
 #if defined(HYPRE_USING_GPU)
@@ -989,11 +1003,17 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
    {
       smoother = hypre_CTAlloc(HYPRE_Solver, smooth_num_levels, HYPRE_MEMORY_HOST);
       hypre_ParAMGDataSmoother(amg_data) = smoother;
+      /* Allocate per-level solve flops array for smoothers */
+      hypre_ParAMGDataSmootherSolveFlops(amg_data) =
+         hypre_CTAlloc(HYPRE_Real, smooth_num_levels, HYPRE_MEMORY_HOST);
    }
 
    /*-----------------------------------------------------
     *  Enter Coarsening Loop
     *-----------------------------------------------------*/
+
+   /* Initialize setup FLOP counter - will be accumulated during setup */
+   hypre_ParAMGDataSetupFlops(amg_data) = 0.0;
 
    while (not_finished_coarsening)
    {
@@ -1348,6 +1368,56 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                else
                {
                   hypre_BoomerAMGCoarsen(S2, S2, 0, debug_flag, &CFN_marker);
+               }
+
+               /* Accumulate Create2ndS cost: boolean SpGEMM computing S^2
+                * restricted to C-point rows. For each C-point row i1, we
+                * traverse S[i1] (outer) and for each neighbor i2, traverse
+                * S[i2] (inner). All graph work, no FMA.
+                * Graph: n_C (marker init) + nnz(S_C) * nnz(S) / n (two-hop traversal)
+                *   where nnz(S_C) ~ nnz(S) * n_C / n (C-point rows of S) */
+               {
+                  HYPRE_Real nnz_S = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixDiag(S)) + hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixOffd(S)));
+                  HYPRE_Real n_fine = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(S);
+                  HYPRE_Real n_C = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(S2);
+                  if (n_fine > 0)
+                  {
+                     HYPRE_Real nnz_S_C = nnz_S * n_C / n_fine;
+                     hypre_ParAMGDataSetupGraphOps(amg_data) += n_C + nnz_S_C * nnz_S / n_fine;
+                  }
+               }
+
+               /* Accumulate second coarsening cost on S2.
+                * Same model as the first coarsening (see coarsening cost block below). */
+               {
+                  HYPRE_Real nnz_S2 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixDiag(S2)) + hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixOffd(S2)));
+                  HYPRE_Real n_S2 = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(S2);
+                  HYPRE_Real coarsen2_graph_ops;
+
+                  if (coarsen_type >= 1 && coarsen_type <= 7)
+                  {
+                     coarsen2_graph_ops = 4.0 * nnz_S2 + n_S2;
+                  }
+                  else if (coarsen_type == 8 || coarsen_type == 9 || coarsen_type == 10)
+                  {
+                     HYPRE_Int pmis_iters2 = hypre_BoomerAMGCoarsenPMISNumIters();
+                     coarsen2_graph_ops = nnz_S2 + n_S2 + (HYPRE_Real) pmis_iters2 * 2.0 * nnz_S2;
+                  }
+                  else if (coarsen_type == 21 || coarsen_type == 22)
+                  {
+                     coarsen2_graph_ops = nnz_S2 + n_S2 + (HYPRE_Real) cgc_its * 2.0 * nnz_S2;
+                  }
+                  else
+                  {
+                     coarsen2_graph_ops = 6.0 * nnz_S2;
+                  }
+
+                  hypre_ParAMGDataSetupFlops(amg_data) += n_S2;
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += coarsen2_graph_ops;
                }
 
                hypre_ParCSRMatrixDestroy(S2);
@@ -1725,6 +1795,83 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   coarse_dof_func = NULL;
                }
 
+               /* Accumulate SOC cost before early exit (coarse_size == 0 or fine_size) */
+               {
+                  HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[level])) +
+                                                hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[level])));
+                  HYPRE_Real n_A = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+                  if (hypre_ParAMGDataGSMG(amg_data))
+                  {
+                     /* GSMG SOC: CreateSmoothVecs + FillSmooth + ChooseThresh + Threshold
+                      * SmoothVecs: nsamples relaxation sweeps (nsamples * num_sweeps * nnz FMA)
+                      *             + rand generation (nsamples * n graph) + subtract (nsamples * n FMA)
+                      * FillSmooth: normalize (nsamples * (2n+3) FMA)
+                      *             + distances ((nnz-n) * (2*nsamples+1) FMA, (nnz-n) * nsamples graph)
+                      * ChooseThresh: max/min search (nnz + n graph) */
+                     HYPRE_Int nsamples = hypre_ParAMGDataNumSamples(amg_data);
+                     HYPRE_Int num_sweeps_sv = hypre_ParAMGDataNumGridSweeps(amg_data)[1];
+                     HYPRE_Real ns = (HYPRE_Real) nsamples;
+                     HYPRE_Real nsw = (HYPRE_Real) num_sweeps_sv;
+                     hypre_ParAMGDataSetupFlops(amg_data) +=
+                        ns * nsw * nnz_A + ns * n_A + ns * (2.0 * n_A + 3.0)
+                        + (nnz_A - n_A) * (2.0 * ns + 1.0);
+                     hypre_ParAMGDataSetupGraphOps(amg_data) +=
+                        ns * n_A + (nnz_A - n_A) * ns + nnz_A + n_A;
+                  }
+                  else
+                  {
+                     /* Standard/Sabs SOC
+                      * Numerical: nnz(A) + n (row_sum adds + n threshold muls)
+                      * Graph: standard = (nnz-n) max/min search + 2n abs = nnz+n
+                      *        Sabs = adds abs per entry, see main path comment */
+                     HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+                     HYPRE_Int used_sabs_early = 0;
+                     if (nodal > 0 && nodal != 4)
+                     {
+                        used_sabs_early = !(nodal == 3 || nodal == 6 || nodal_diag > 0);
+                     }
+                     else
+                     {
+                        used_sabs_early = useSabs;
+                     }
+                     hypre_ParAMGDataSetupFlops(amg_data) += (nnz_A + n_A) * blk_mult;
+                     if (used_sabs_early)
+                     {
+                        hypre_ParAMGDataSetupGraphOps(amg_data) += (4.0 * nnz_A - n_A) * blk_mult;
+                     }
+                     else
+                     {
+                        hypre_ParAMGDataSetupGraphOps(amg_data) += (nnz_A + n_A) * blk_mult;
+                     }
+                  }
+               }
+               /* Coarsening cost (early exit path) - same logic as main path */
+               if (S != NULL)
+               {
+                  /* Compute nnz from local CSR data (global num_nonzeros may not be set) */
+                  hypre_CSRMatrix *S_diag_e1 = hypre_ParCSRMatrixDiag(S);
+                  hypre_CSRMatrix *S_offd_e1 = hypre_ParCSRMatrixOffd(S);
+                  HYPRE_Real nnz_S = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(S_diag_e1) +
+                                                   hypre_CSRMatrixNumNonzeros(S_offd_e1));
+                  HYPRE_Real n_S = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(S);
+                  HYPRE_Real coarsen_graph_ops_e1;
+                  if (coarsen_type >= 1 && coarsen_type <= 7)
+                  {
+                     coarsen_graph_ops_e1 = 4.0 * nnz_S + n_S;
+                  }
+                  else if (coarsen_type == 8 || coarsen_type == 9 || coarsen_type == 10)
+                  {
+                     HYPRE_Int pmis_iters_e1 = hypre_BoomerAMGCoarsenPMISNumIters();
+                     coarsen_graph_ops_e1 = nnz_S + n_S + (HYPRE_Real) pmis_iters_e1 * 2.0 * nnz_S;
+                  }
+                  else
+                  {
+                     coarsen_graph_ops_e1 = 6.0 * nnz_S;
+                  }
+                  hypre_ParAMGDataSetupFlops(amg_data) += n_S;
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += coarsen_graph_ops_e1;
+               }
+
                HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
                break;
             }
@@ -1756,6 +1903,75 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   Sabs = NULL;
                }
 
+               /* Accumulate SOC cost before early exit (coarse_size < min_coarse_size) */
+               {
+                  HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[level])) +
+                                                hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[level])));
+                  HYPRE_Real n_A = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+                  if (hypre_ParAMGDataGSMG(amg_data))
+                  {
+                     /* GSMG SOC (same formula as other early exit path) */
+                     HYPRE_Int nsamples = hypre_ParAMGDataNumSamples(amg_data);
+                     HYPRE_Int num_sweeps_sv = hypre_ParAMGDataNumGridSweeps(amg_data)[1];
+                     HYPRE_Real ns = (HYPRE_Real) nsamples;
+                     HYPRE_Real nsw = (HYPRE_Real) num_sweeps_sv;
+                     hypre_ParAMGDataSetupFlops(amg_data) +=
+                        ns * nsw * nnz_A + ns * n_A + ns * (2.0 * n_A + 3.0)
+                        + (nnz_A - n_A) * (2.0 * ns + 1.0);
+                     hypre_ParAMGDataSetupGraphOps(amg_data) +=
+                        ns * n_A + (nnz_A - n_A) * ns + nnz_A + n_A;
+                  }
+                  else
+                  {
+                     /* Standard/Sabs SOC */
+                     HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+                     HYPRE_Int used_sabs_early = 0;
+                     if (nodal > 0 && nodal != 4)
+                     {
+                        used_sabs_early = !(nodal == 3 || nodal == 6 || nodal_diag > 0);
+                     }
+                     else
+                     {
+                        used_sabs_early = useSabs;
+                     }
+                     hypre_ParAMGDataSetupFlops(amg_data) += (nnz_A + n_A) * blk_mult;
+                     if (used_sabs_early)
+                     {
+                        hypre_ParAMGDataSetupGraphOps(amg_data) += (4.0 * nnz_A - n_A) * blk_mult;
+                     }
+                     else
+                     {
+                        hypre_ParAMGDataSetupGraphOps(amg_data) += (nnz_A + n_A) * blk_mult;
+                     }
+                  }
+               }
+               /* Coarsening cost (early exit path) - same logic as main path */
+               if (S != NULL)
+               {
+                  /* Compute nnz from local CSR data (global num_nonzeros may not be set) */
+                  hypre_CSRMatrix *S_diag_e2 = hypre_ParCSRMatrixDiag(S);
+                  hypre_CSRMatrix *S_offd_e2 = hypre_ParCSRMatrixOffd(S);
+                  HYPRE_Real nnz_S = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(S_diag_e2) +
+                                                   hypre_CSRMatrixNumNonzeros(S_offd_e2));
+                  HYPRE_Real n_S = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(S);
+                  HYPRE_Real coarsen_graph_ops_e2;
+                  if (coarsen_type >= 1 && coarsen_type <= 7)
+                  {
+                     coarsen_graph_ops_e2 = 4.0 * nnz_S + n_S;
+                  }
+                  else if (coarsen_type == 8 || coarsen_type == 9 || coarsen_type == 10)
+                  {
+                     HYPRE_Int pmis_iters_e2 = hypre_BoomerAMGCoarsenPMISNumIters();
+                     coarsen_graph_ops_e2 = nnz_S + n_S + (HYPRE_Real) pmis_iters_e2 * 2.0 * nnz_S;
+                  }
+                  else
+                  {
+                     coarsen_graph_ops_e2 = 6.0 * nnz_S;
+                  }
+                  hypre_ParAMGDataSetupFlops(amg_data) += n_S;
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += coarsen_graph_ops_e2;
+               }
+
                HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
                break;
             }
@@ -1765,7 +1981,188 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 
          /*****xxxxxxxxxxxxx changes for min_coarse_size  end */
          HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
+
+         /* Accumulate SOC (strength of connection) cost */
+         if (S != NULL)
+         {
+            HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[level])) +
+                                                hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[level])));
+            HYPRE_Real n_A = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+            if (hypre_ParAMGDataGSMG(amg_data))
+            {
+               /* GSMG SOC: CreateSmoothVecs + FillSmooth + ChooseThresh + Threshold
+                * SmoothVecs: nsamples relaxation sweeps (nsamples * num_sweeps * nnz FMA)
+                *             + rand generation (nsamples * n graph) + subtract (nsamples * n FMA)
+                * FillSmooth: normalize (nsamples * (2n+3) FMA)
+                *             + distances ((nnz-n) * (2*nsamples+1) FMA, (nnz-n) * nsamples graph)
+                * ChooseThresh: max/min search (nnz + n graph) */
+               HYPRE_Int nsamples = hypre_ParAMGDataNumSamples(amg_data);
+               HYPRE_Int num_sweeps_sv = hypre_ParAMGDataNumGridSweeps(amg_data)[1];
+               HYPRE_Real ns = (HYPRE_Real) nsamples;
+               HYPRE_Real nsw = (HYPRE_Real) num_sweeps_sv;
+               hypre_ParAMGDataSetupFlops(amg_data) +=
+                  ns * nsw * nnz_A + ns * n_A + ns * (2.0 * n_A + 3.0)
+                  + (nnz_A - n_A) * (2.0 * ns + 1.0);
+               hypre_ParAMGDataSetupGraphOps(amg_data) +=
+                  ns * n_A + (nnz_A - n_A) * ns + nnz_A + n_A;
+            }
+            else
+            {
+               /* Standard/Sabs SOC
+                * Two passes over off-diagonal A entries (num_functions=1):
+                *   Loop 1: row_scale (max/min comparison) + row_sum (add) per entry
+                *   Loop 2: strength threshold test (1 mul/row + 1 comparison/entry)
+                * Numerical: nnz(A) + n (row_sum adds + threshold muls)
+                * Graph: standard = (nnz-n) max/min search + 2n abs = nnz+n
+                *        Sabs = 4*nnz - n (see below) */
+               HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+               hypre_ParAMGDataSetupFlops(amg_data) += (nnz_A + n_A) * blk_mult;
+               /* Determine if Sabs variant was used:
+                * - nodal mode with nodal != 3,6 and nodal_diag <= 0 uses Sabs
+                * - standard mode with useSabs uses Sabs */
+               HYPRE_Int used_sabs = 0;
+               if (nodal > 0 && nodal != 4)
+               {
+                  used_sabs = !(nodal == 3 || nodal == 6 || nodal_diag > 0);
+               }
+               else
+               {
+                  used_sabs = useSabs;
+               }
+               if (used_sabs)
+               {
+                  /* Sabs: (nnz-n) max search + n abs(diag) init
+                   *       + 2*(nnz-n) pass1 abs (abs for max + abs for sum)
+                   *       + 2n abs(row_sum,diag) check + (nnz-n) pass2 abs
+                   *       = 4*nnz - n */
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += (4.0 * nnz_A - n_A) * blk_mult;
+               }
+               else
+               {
+                  /* Standard: (nnz-n) max/min search + 2n abs(row_sum)+abs(diag) = nnz+n */
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += (nnz_A + n_A) * blk_mult;
+               }
+            }
+         }
+
+         /* For AIR methods, an additional Sabs matrix is created with a different threshold.
+          * Numerical: nnz(A) + n (row_sum adds + threshold multiply)
+          * Graph: 3*nnz(A) (same Sabs formula as above). */
+         if (Sabs != NULL)
+         {
+            HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[level])) +
+                                                hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[level])));
+            HYPRE_Real n_A = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+            HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+            hypre_ParAMGDataSetupFlops(amg_data) += (nnz_A + n_A) * blk_mult;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += (4.0 * nnz_A - n_A) * blk_mult;
+         }
+
+         /* For CR coarsening (type 99), a second strength matrix SCR is created
+          * with CR_strong_th. Same CreateS cost as the primary S matrix.
+          * Numerical: nnz(A) + n (row_sum adds + threshold multiply)
+          * Graph: nnz(A) + n (max/min search + abs checks) */
+         if (coarsen_type == 99)
+         {
+            HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[level])) +
+                                                hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[level])));
+            HYPRE_Real n_A = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+            hypre_ParAMGDataSetupFlops(amg_data) += nnz_A + n_A;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += nnz_A + n_A;
+         }
+
+         /* Accumulate coarsening (C/F splitting) cost.
+          * Numerical: n (random measure augmentation)
+          * Graph: depends on coarsening algorithm:
+          *   Ruge/Falgout (types 1-7): deterministic single-pass greedy algorithm.
+          *     transpose(nnz_S) + measure_init(n) + selection(2*nnz_S) + F-check(nnz_S) = 4*nnz_S + n
+          *   PMIS (types 8-9): iterative independent set. Uses actual iteration count
+          *     from hypre_BoomerAMGCoarsenPMISNumIters(). Per iter: 2*nnz_S (IS + conflict).
+          *     Plus initial measure: nnz_S + n.
+          *   HMIS (type 10): Ruge first pass + PMIS on remaining. Same as PMIS path
+          *     since PMIS iter count reflects the actual PMIS work within HMIS.
+          *   CGC (types 21-22): explicit cgc_its iterations, each ~2*nnz_S. */
+         if (S != NULL)
+         {
+            /* Compute nnz from local CSR data (global num_nonzeros may not be set) */
+            hypre_CSRMatrix *S_diag_tmp = hypre_ParCSRMatrixDiag(S);
+            hypre_CSRMatrix *S_offd_tmp = hypre_ParCSRMatrixOffd(S);
+            HYPRE_Real nnz_S = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(S_diag_tmp) +
+                                             hypre_CSRMatrixNumNonzeros(S_offd_tmp));
+            HYPRE_Real n_S = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(S);
+            HYPRE_Real coarsen_graph_ops;
+
+            if (coarsen_type >= 1 && coarsen_type <= 7)
+            {
+               /* Ruge/Falgout: deterministic greedy algorithm (not iterative).
+                * Passes: S^T construction (nnz_S) + measure init (n) +
+                *         greedy selection traversing S and S^T (2*nnz_S) +
+                *         second pass F-point check (nnz_S) = 4*nnz_S + n */
+               coarsen_graph_ops = 4.0 * nnz_S + n_S;
+            }
+            else if (coarsen_type == 8 || coarsen_type == 9 || coarsen_type == 10)
+            {
+               /* PMIS/HMIS: iterative independent set algorithm.
+                * Initial: measure computation (nnz_S) + random augmentation (n)
+                * Per iteration: IS selection + conflict resolution (2*nnz_S)
+                * For HMIS, the Ruge first-pass cost is included in the PMIS
+                * iteration count since Ruge pre-classifies most points. */
+               HYPRE_Int pmis_iters = hypre_BoomerAMGCoarsenPMISNumIters();
+               coarsen_graph_ops = nnz_S + n_S + (HYPRE_Real) pmis_iters * 2.0 * nnz_S;
+            }
+            else if (coarsen_type == 21 || coarsen_type == 22)
+            {
+               /* CGC: explicit iteration count from cgc_its parameter */
+               coarsen_graph_ops = nnz_S + n_S + (HYPRE_Real) cgc_its * 2.0 * nnz_S;
+            }
+            else
+            {
+               /* Other/unknown: use 3-iteration estimate */
+               coarsen_graph_ops = 6.0 * nnz_S;
+            }
+
+            hypre_ParAMGDataSetupFlops(amg_data) += n_S;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += coarsen_graph_ops;
+         }
+
+         /* Compute nnz(S_FF) - count of F-F strong connections for FLOP formulas */
+         if (S != NULL && CF_marker != NULL)
+         {
+            hypre_CSRMatrix *S_diag = hypre_ParCSRMatrixDiag(S);
+            HYPRE_Int *S_diag_i = hypre_CSRMatrixI(S_diag);
+            HYPRE_Int *S_diag_j = hypre_CSRMatrixJ(S_diag);
+            HYPRE_Int S_diag_nrows = hypre_CSRMatrixNumRows(S_diag);
+            HYPRE_BigInt local_nnz_S_FF = 0;
+            HYPRE_Int ii, jj;
+
+            for (ii = 0; ii < S_diag_nrows; ii++)
+            {
+               if (CF_marker[ii] < 0)  /* row is F-point */
+               {
+                  for (jj = S_diag_i[ii]; jj < S_diag_i[ii + 1]; jj++)
+                  {
+                     if (CF_marker[S_diag_j[jj]] < 0)  /* col is F-point */
+                     {
+                        local_nnz_S_FF++;
+                     }
+                  }
+               }
+            }
+
+            /* Sum across processors */
+            hypre_MPI_Allreduce(&local_nnz_S_FF, &hypre_ParAMGDataNnzSFF(amg_data)[level],
+                                1, HYPRE_MPI_BIG_INT, hypre_MPI_SUM, comm);
+         }
+
          HYPRE_ANNOTATE_REGION_BEGIN("%s", "Interpolation");
+
+         /* For two-stage aggressive coarsening (agg_interp_type 1,2,3,5,6,7),
+          * P1 and P2 are built then composed as P = P1*P2. Capture their nnz
+          * before they are destroyed so interpolation cost formulas can use
+          * nnz(P1) and nnz(P2) instead of nnz(P) = nnz(P1*P2). */
+         HYPRE_Real agg_nnz_P1 = 0.0;
+         HYPRE_Real agg_nnz_P2 = 0.0;
+         HYPRE_Real agg_n_C1   = 0.0;  /* intermediate coarse-grid size (cols of P1) */
 
          if (level < agg_num_levels)
          {
@@ -1807,6 +2204,7 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                                                    CF_marker, S, coarse_pnts_global,
                                                    num_functions, dof_func_data, debug_flag,
                                                    agg_trunc_factor, agg_P_max_elmts, sep_weight,
+                                                   &hypre_ParAMGDataInterpNumPasses(amg_data)[level],
                                                    &P);
                   }
                   else
@@ -1902,14 +2300,52 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   {
                      P = hypre_ParMatmul(P1, P2);
                   }
+                  /* P1*P2 SpGEMM cost: nnz(P1) * nnz(P2) / n_coarse1, equal for FMA and graph */
+                  {
+                     HYPRE_Real pp_nnz_P1 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(P1)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(P1)));
+                     HYPRE_Real pp_nnz_P2 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(P2)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(P2)));
+                     HYPRE_Real pp_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumCols(P1);
+                     if (pp_n > 0)
+                     {
+                        HYPRE_Real pp_cost = pp_nnz_P1 * pp_nnz_P2 / pp_n;
+                        hypre_ParAMGDataSetupFlops(amg_data) += pp_cost;
+                        hypre_ParAMGDataSetupGraphOps(amg_data) += pp_cost;
+                     }
+                  }
 
                   hypre_BoomerAMGInterpTruncation(P, agg_trunc_factor, agg_P_max_elmts);
+
+                  /* Truncation cost: abs + max search per row, rescale survivors.
+                   * FMA: nnz(P) (row sums) + n (divisions for rescaling)
+                   * Graph: 2*nnz(P) (abs per entry + max search per entry) */
+                  if (agg_trunc_factor != 0.0 || agg_P_max_elmts > 0)
+                  {
+                     HYPRE_Real trunc_nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(P)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(P)));
+                     HYPRE_Real trunc_n_P = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(P);
+                     hypre_ParAMGDataSetupFlops(amg_data) += trunc_nnz_P + trunc_n_P;
+                     hypre_ParAMGDataSetupGraphOps(amg_data) += 2.0 * trunc_nnz_P;
+                  }
 
                   if (agg_trunc_factor != 0.0 || agg_P_max_elmts > 0 ||
                       agg_P12_trunc_factor != 0.0 || agg_P12_max_elmts > 0)
                   {
                      hypre_ParCSRMatrixCompressOffdMap(P);
                   }
+
+                  /* Capture P1/P2 sizes before destruction */
+                  agg_nnz_P1 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixDiag(P1)) + hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixOffd(P1)));
+                  agg_nnz_P2 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixDiag(P2)) + hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixOffd(P2)));
+                  agg_n_C1 = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumCols(P1);
 
                   hypre_MatvecCommPkgCreate(P);
                   hypre_ParCSRMatrixDestroy(P1);
@@ -1940,6 +2376,7 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                                                    CF_marker, S, coarse_pnts_global,
                                                    num_functions, dof_func_data, debug_flag,
                                                    agg_trunc_factor, agg_P_max_elmts, sep_weight,
+                                                   &hypre_ParAMGDataInterpNumPasses(amg_data)[level],
                                                    &P);
                   }
                   else
@@ -2070,6 +2507,22 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   {
                      P = hypre_ParMatmul(P1, P2);
                   }
+                  /* P1*P2 SpGEMM cost: nnz(P1) * nnz(P2) / n_coarse1, equal for FMA and graph */
+                  {
+                     HYPRE_Real pp_nnz_P1 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(P1)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(P1)));
+                     HYPRE_Real pp_nnz_P2 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(P2)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(P2)));
+                     HYPRE_Real pp_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumCols(P1);
+                     if (pp_n > 0)
+                     {
+                        HYPRE_Real pp_cost = pp_nnz_P1 * pp_nnz_P2 / pp_n;
+                        hypre_ParAMGDataSetupFlops(amg_data) += pp_cost;
+                        hypre_ParAMGDataSetupGraphOps(amg_data) += pp_cost;
+                     }
+                  }
 
                   hypre_BoomerAMGInterpTruncation(P, agg_trunc_factor,
                                                   agg_P_max_elmts);
@@ -2193,7 +2646,8 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
             {
                hypre_BoomerAMGBuildMultipass(A_array[level], CF_marker,
                                              S, coarse_pnts_global, num_functions, dof_func_data,
-                                             debug_flag, trunc_factor, P_max_elmts, sep_weight, &P);
+                                             debug_flag, trunc_factor, P_max_elmts, sep_weight,
+                                             &hypre_ParAMGDataInterpNumPasses(amg_data)[level], &P);
             }
             else if (interp_type == 1)
             {
@@ -2488,6 +2942,698 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
             dof_func_array[level + 1] = coarse_dof_func;
          }
 
+         /* Accumulate interpolation construction FLOP cost (method-specific formulas) */
+         if (P != NULL)
+         {
+            /* Compute nnz from local CSR data (global num_nonzeros may not be set) */
+            hypre_CSRMatrix *A_diag_interp = hypre_ParCSRMatrixDiag(A_array[level]);
+            hypre_CSRMatrix *A_offd_interp = hypre_ParCSRMatrixOffd(A_array[level]);
+            hypre_CSRMatrix *P_diag_interp = hypre_ParCSRMatrixDiag(P);
+            hypre_CSRMatrix *P_offd_interp = hypre_ParCSRMatrixOffd(P);
+            HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(A_diag_interp) +
+                                             hypre_CSRMatrixNumNonzeros(A_offd_interp));
+            HYPRE_Real nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(P_diag_interp) +
+                                             hypre_CSRMatrixNumNonzeros(P_offd_interp));
+            HYPRE_Real nnz_S = nnz_A;
+            if (S != NULL)
+            {
+               hypre_CSRMatrix *S_diag_interp = hypre_ParCSRMatrixDiag(S);
+               hypre_CSRMatrix *S_offd_interp = hypre_ParCSRMatrixOffd(S);
+               nnz_S = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(S_diag_interp) +
+                                     hypre_CSRMatrixNumNonzeros(S_offd_interp));
+            }
+            HYPRE_Real nnz_S_FF = (HYPRE_Real) hypre_ParAMGDataNnzSFF(amg_data)[level];
+            HYPRE_Real n_rows = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+            HYPRE_Real n_C = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumCols(P);
+            HYPRE_Real n_F = n_rows - n_C;
+            HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+            HYPRE_Real interp_flops = 0.0;
+            HYPRE_Real interp_graph_ops = 0.0;
+
+            /* For two-stage aggressive coarsening, the switch block computes the
+             * cost of building P1 (the first-stage interpolation). Override nnz_P
+             * and n_C with P1's values so the formula uses the correct sizes.
+             * Save originals for computing P2's cost afterward. */
+            HYPRE_Real saved_nnz_P = nnz_P;
+            HYPRE_Real saved_n_C   = n_C;
+            HYPRE_Real saved_n_F   = n_F;
+            if (agg_nnz_P1 > 0.0)
+            {
+               nnz_P = agg_nnz_P1;
+               n_C   = agg_n_C1;
+               n_F   = n_rows - agg_n_C1;
+            }
+
+            /* Select formula based on interpolation type used at this level.
+             * agg_interp_type uses different numbering than interp_type for the
+             * same underlying functions, so remap to canonical interp_type values. */
+            HYPRE_Int cur_interp;
+            if (level < agg_num_levels)
+            {
+               switch (agg_interp_type)
+               {
+                  case 1:  cur_interp = 6;  break; /* ExtPIInterp */
+                  case 2:  cur_interp = 8;  break; /* StdInterp */
+                  case 3:  cur_interp = 14; break; /* ExtInterp */
+                  case 4:  cur_interp = 4;  break; /* Multipass */
+                  case 5:  cur_interp = 16; break; /* ModExtInterp */
+                  case 6:  cur_interp = 17; break; /* ModExtPIInterp */
+                  case 7:  cur_interp = 18; break; /* ModExtPEInterp */
+                  case 8:  cur_interp = 108; break; /* ModMultipass */
+                  case 9:  cur_interp = 109; break; /* ModMultipass (fused) */
+                  default: cur_interp = agg_interp_type; break;
+               }
+            }
+            else
+            {
+               cur_interp = interp_type;
+            }
+
+            /* GSMG interpolation: BuildInterpGSMG operates on S (not A).
+             * Same structure as classical interpolation (Type 0) but with S
+             * instead of A. Case 1 (C-neighbor): accumulate S entry.
+             * Case 2 (strong F-neighbor): sum + distribute through S[i1,:].
+             * Case 3 (weak): do nothing (no A traversal — A is unused).
+             * Normalization: sum P row + divide = 2*(nnz(P) - n_C).
+             * Only applies to non-aggressive levels (aggressive uses normal interp). */
+            if (hypre_ParAMGDataGSMG(amg_data) && level >= agg_num_levels)
+            {
+               HYPRE_Real nnz_S_FC = nnz_S * n_F / n_rows - nnz_S_FF;
+               if (nnz_S_FC < 0.0) { nnz_S_FC = 0.0; }
+               interp_flops = nnz_S_FC + 2.0 * nnz_S_FF * nnz_S / n_rows
+                            + nnz_S_FF + 2.0 * (nnz_P - n_C);
+               interp_graph_ops = 3.0 * n_rows + nnz_S
+                                + nnz_S_FF * nnz_S / n_rows;
+            }
+            else
+            switch (cur_interp)
+            {
+               case 19: /* Classical interpolation with num_functions=1 override
+                          * Same function as Type 0 (hypre_BoomerAMGBuildInterp) */
+               case 0:  /* Classical modified interpolation
+                         * Graph: 2n + 2*n_C + 2*nnz(S_F) + 2*nnz(S_FF)*nnz(A)/n
+                         *   ≈ 3n + nnz(S) + nnz(S_FF)*nnz(A)/n
+                         *   - fine_to_coarse init: n
+                         *   - Pass 1 (count P): n_C + nnz(S_F)
+                         *   - P_marker init: n
+                         *   - Pass 2 (pattern fill): n_C + nnz(S_F)
+                         *   - Case 2 traversals: 2*nnz(S_FF)*nnz(A)/n (sum + distribute loops)
+                         * Numerical: nnz(A_F) + 2*(nnz(P) - n_C) + 2*nnz(S_FF)*nnz(A)/n
+                         *   - Cases 1+3: nnz(A_F) adds (A traversal for F-rows)
+                         *   - Case 2 sum + distribute: 2*nnz(S_FF)*nnz(A)/n + nnz(S_FF) divisions
+                         *   - Normalization: nnz(P) - n_C divisions (F-rows only) */
+                  {
+                     /* Compute nnz_A_F: nnz of A restricted to F-point rows */
+                     HYPRE_Real nnz_A_F = 0.0;
+                     if (CF_marker_array && CF_marker_array[level])
+                     {
+                        HYPRE_Int *CF_marker_data = hypre_IntArrayData(CF_marker_array[level]);
+                        hypre_CSRMatrix *A_diag = hypre_ParCSRMatrixDiag(A_array[level]);
+                        hypre_CSRMatrix *A_offd = hypre_ParCSRMatrixOffd(A_array[level]);
+                        HYPRE_Int *A_diag_i = hypre_CSRMatrixI(A_diag);
+                        HYPRE_Int *A_offd_i = hypre_CSRMatrixI(A_offd);
+                        HYPRE_Int n_local = hypre_CSRMatrixNumRows(A_diag);
+                        HYPRE_Int i;
+                        for (i = 0; i < n_local; i++)
+                        {
+                           if (CF_marker_data[i] < 0)  /* F-point */
+                           {
+                              nnz_A_F += (A_diag_i[i + 1] - A_diag_i[i]) +
+                                         (A_offd_i[i + 1] - A_offd_i[i]);
+                           }
+                        }
+                     }
+                     else
+                     {
+                        /* Fallback: estimate as half of nnz_A */
+                        nnz_A_F = nnz_A * 0.5;
+                     }
+
+                     /* Graph: 3n + nnz(S) + nnz(S_FF)*nnz(A)/n */
+                     interp_graph_ops = 3.0 * n_rows + nnz_S + nnz_S_FF * nnz_A / n_rows;
+
+                     /* Numerical: nnz(A_F) + 2*(nnz(P) - n_C) + 2*nnz(S_FF)*nnz(A)/n */
+                     interp_flops = nnz_A_F + 2.0 * (nnz_P - n_C) + 2.0 * nnz_S_FF * nnz_A / n_rows;
+                  }
+                  break;
+
+               case 15: /* Direct interpolation with adaptive weights (GPU only)
+                          * On CPU, identical to case 3 */
+               case 3:  /* Direct interpolation
+                         * Graph: 2n + 2*n_C + 2*nnz(S_F) ≈ 3n + nnz(S)
+                         *   - fine_to_coarse init: n
+                         *   - Pass 1 (count P): n_C + nnz(S_F)
+                         *   - P_marker init: n
+                         *   - Pass 2 (pattern fill): n_C + nnz(S_F)
+                         * Numerical: nnz(A_F) + n_F + 3*(nnz(P) - n_C)
+                         *   - A traversal (F-rows only, skip diagonal): nnz(A_F) - n_F
+                         *   - P += A and sum_P += A: 2*(nnz(P) - n_C) (F-rows only)
+                         *   - alfa/beta computation: 2*n_F
+                         *   - normalization: nnz(P) - n_C (F-rows only)
+                         * Note: No F-neighbor distribution (unlike classical) */
+                  {
+                     /* Compute nnz_A_F: nnz of A restricted to F-point rows */
+                     HYPRE_Real nnz_A_F = 0.0;
+                     HYPRE_Real n_F_loc = n_F;  /* from ncols(P); refined below if CF_marker available */
+                     if (CF_marker_array && CF_marker_array[level])
+                     {
+                        HYPRE_Int *CF_marker_data = hypre_IntArrayData(CF_marker_array[level]);
+                        hypre_CSRMatrix *A_diag = hypre_ParCSRMatrixDiag(A_array[level]);
+                        hypre_CSRMatrix *A_offd = hypre_ParCSRMatrixOffd(A_array[level]);
+                        HYPRE_Int *A_diag_i = hypre_CSRMatrixI(A_diag);
+                        HYPRE_Int *A_offd_i = hypre_CSRMatrixI(A_offd);
+                        HYPRE_Int n_local = hypre_CSRMatrixNumRows(A_diag);
+                        HYPRE_Int i;
+                        n_F_loc = 0.0;
+                        for (i = 0; i < n_local; i++)
+                        {
+                           if (CF_marker_data[i] < 0)  /* F-point */
+                           {
+                              nnz_A_F += (A_diag_i[i + 1] - A_diag_i[i]) +
+                                         (A_offd_i[i + 1] - A_offd_i[i]);
+                              n_F_loc += 1.0;
+                           }
+                        }
+                     }
+                     else
+                     {
+                        /* Fallback: estimate as half of nnz_A */
+                        nnz_A_F = nnz_A * 0.5;
+                     }
+
+                     /* Graph: 3n + nnz(S) */
+                     interp_graph_ops = 3.0 * n_rows + nnz_S;
+
+                     /* Numerical: nnz(A_F) + n_F + 3*(nnz(P) - n_C) */
+                     interp_flops = nnz_A_F + n_F_loc + 3.0 * (nnz_P - n_C);
+                  }
+                  break;
+
+               case 6:  /* Extended+i interpolation (DEFAULT)
+                         * Graph: 5n + 2*nnz(S_F) + 2*nnz(S_FF)*nnz(S)/n
+                         *   ≈ 5n + nnz(S) + 2*nnz(S_FF)*nnz(S)/n
+                         *   - fine_to_coarse init: n
+                         *   - P_marker init: n (×2 for both passes)
+                         *   - Pass 1 (count P): n + nnz(S_F) + nnz(S_FF)*nnz(S)/n
+                         *   - Pass 2 (pattern fill): n + nnz(S_F) + nnz(S_FF)*nnz(S)/n
+                         * Numerical: nnz(A_F) + 2*nnz(S_FF)*nnz(A)/n + nnz(P) - n_C
+                         *   - A traversal for F-rows: nnz(A_F)
+                         *   - Sum + distribute over A[F-neighbor]: 2*nnz(S_FF)*nnz(A)/n
+                         *   - Normalization: nnz(P) - n_C divisions (F-rows only) */
+                  {
+                     /* Compute nnz_A_F: nnz of A restricted to F-point rows */
+                     HYPRE_Real nnz_A_F = 0.0;
+                     if (CF_marker_array && CF_marker_array[level])
+                     {
+                        HYPRE_Int *CF_marker_data = hypre_IntArrayData(CF_marker_array[level]);
+                        hypre_CSRMatrix *A_diag = hypre_ParCSRMatrixDiag(A_array[level]);
+                        hypre_CSRMatrix *A_offd = hypre_ParCSRMatrixOffd(A_array[level]);
+                        HYPRE_Int *A_diag_i = hypre_CSRMatrixI(A_diag);
+                        HYPRE_Int *A_offd_i = hypre_CSRMatrixI(A_offd);
+                        HYPRE_Int n_local = hypre_CSRMatrixNumRows(A_diag);
+                        HYPRE_Int i;
+                        for (i = 0; i < n_local; i++)
+                        {
+                           if (CF_marker_data[i] < 0)  /* F-point */
+                           {
+                              nnz_A_F += (A_diag_i[i + 1] - A_diag_i[i]) +
+                                         (A_offd_i[i + 1] - A_offd_i[i]);
+                           }
+                        }
+                     }
+                     else
+                     {
+                        /* Fallback: estimate as half of nnz_A */
+                        nnz_A_F = nnz_A * 0.5;
+                     }
+
+                     /* Graph: 5n + nnz(S) + 2*nnz(S_FF)*nnz(S)/n */
+                     interp_graph_ops = 5.0 * n_rows + nnz_S + 2.0 * nnz_S_FF * nnz_S / n_rows;
+
+                     /* Numerical: nnz(A_F) + 2*nnz(S_FF)*nnz(A)/n + nnz(P) - n_C */
+                     interp_flops = nnz_A_F + 2.0 * nnz_S_FF * nnz_A / n_rows + nnz_P - n_C;
+                  }
+                  break;
+
+               case 7:  /* Extended+i (if no common C) interpolation
+                         * Graph: 5n + 2*nnz(S_F) + 4*nnz(S_FF)*nnz(S)/n
+                         *   ≈ 5n + nnz(S) + 4*nnz(S_FF)*nnz(S)/n
+                         *   - hypre_initialize_vecs: 2n (fine_to_coarse + P_marker)
+                         *   - Pass 1: n + nnz(S_F) + 2*nnz(S_FF)*nnz(S)/n (common C check + extension)
+                         *   - P_marker re-init: n
+                         *   - Pass 2: n + nnz(S_F) + 2*nnz(S_FF)*nnz(S)/n (common C check + extension)
+                         * Numerical: nnz(A_F) + 2*nnz(S_FF)*nnz(A)/n + nnz(P) - n_C
+                         *   - Same as Type 6 (numerical phase is identical) */
+                  {
+                     /* Compute nnz_A_F: nnz of A restricted to F-point rows */
+                     HYPRE_Real nnz_A_F = 0.0;
+                     if (CF_marker_array && CF_marker_array[level])
+                     {
+                        HYPRE_Int *CF_marker_data = hypre_IntArrayData(CF_marker_array[level]);
+                        hypre_CSRMatrix *A_diag = hypre_ParCSRMatrixDiag(A_array[level]);
+                        hypre_CSRMatrix *A_offd = hypre_ParCSRMatrixOffd(A_array[level]);
+                        HYPRE_Int *A_diag_i = hypre_CSRMatrixI(A_diag);
+                        HYPRE_Int *A_offd_i = hypre_CSRMatrixI(A_offd);
+                        HYPRE_Int n_local = hypre_CSRMatrixNumRows(A_diag);
+                        HYPRE_Int i;
+                        for (i = 0; i < n_local; i++)
+                        {
+                           if (CF_marker_data[i] < 0)  /* F-point */
+                           {
+                              nnz_A_F += (A_diag_i[i + 1] - A_diag_i[i]) +
+                                         (A_offd_i[i + 1] - A_offd_i[i]);
+                           }
+                        }
+                     }
+                     else
+                     {
+                        /* Fallback: estimate as half of nnz_A */
+                        nnz_A_F = nnz_A * 0.5;
+                     }
+
+                     /* Graph: 5n + nnz(S) + 4*nnz(S_FF)*nnz(S)/n */
+                     interp_graph_ops = 5.0 * n_rows + nnz_S + 4.0 * nnz_S_FF * nnz_S / n_rows;
+
+                     /* Numerical: nnz(A_F) + 2*nnz(S_FF)*nnz(A)/n + nnz(P) - n_C */
+                     interp_flops = nnz_A_F + 2.0 * nnz_S_FF * nnz_A / n_rows + nnz_P - n_C;
+                  }
+                  break;
+
+               case 8:  /* Standard interpolation
+                         * Graph: 6n + nnz(S) + 2*nnz(S_FF)*nnz(S)/n + nnz(P) + nnz(A_F)
+                         *   - 5n: initialization (fine_to_coarse, P_marker, ahat, ihat re-init)
+                         *   - n: C-point processing in both passes (2*n_C ~ n)
+                         *   - nnz(S): two S traversals for F-point rows
+                         *   - 2*nnz(S_FF)*nnz(S)/n: nested S traversals in both passes
+                         *   - nnz(P) + nnz(A_F): index remapping + ihat reset
+                         * Numerical: 2*nnz(A_F) + nnz(S_FF)*nnz(A)/n + nnz(P) - n_C
+                         *   - 2*nnz(A_F): A traversal + weight summation
+                         *   - nnz(S_FF)*nnz(A)/n: single distribution pass
+                         *   - nnz(P) - n_C: final scaling (F-rows only) */
+               case 9:  /* Standard interpolation with separated weights */
+               {
+                  HYPRE_Real nnz_A_F = 0.0;
+                  if (CF_marker_array && CF_marker_array[level])
+                  {
+                     HYPRE_Int *CF_marker_data = hypre_IntArrayData(CF_marker_array[level]);
+                     hypre_CSRMatrix *A_diag = hypre_ParCSRMatrixDiag(A_array[level]);
+                     hypre_CSRMatrix *A_offd = hypre_ParCSRMatrixOffd(A_array[level]);
+                     HYPRE_Int *A_diag_i = hypre_CSRMatrixI(A_diag);
+                     HYPRE_Int *A_offd_i = hypre_CSRMatrixI(A_offd);
+                     HYPRE_Int n_local = hypre_CSRMatrixNumRows(A_diag);
+                     HYPRE_Int i;
+                     for (i = 0; i < n_local; i++)
+                     {
+                        if (CF_marker_data[i] < 0)  /* F-point */
+                        {
+                           nnz_A_F += (A_diag_i[i + 1] - A_diag_i[i]) +
+                                      (A_offd_i[i + 1] - A_offd_i[i]);
+                        }
+                     }
+                  }
+                  else
+                  {
+                     nnz_A_F = nnz_A * 0.5;
+                  }
+                  interp_graph_ops = 6.0 * n_rows + nnz_S + 2.0 * nnz_S_FF * nnz_S / n_rows +
+                                     nnz_P + nnz_A_F;
+                  interp_flops = 2.0 * nnz_A_F + nnz_S_FF * nnz_A / n_rows + nnz_P - n_C;
+               }
+               break;
+
+               case 12:  /* FF interpolation
+                          * Graph: 4n + 2*nnz(S) + 4*nnz(S_FF)*nnz(S)/n
+                          *   - 3n: init (hypre_initialize_vecs 2n, P_marker re-init n)
+                          *   - n: C-point processing (2*n_C)
+                          *   - 2*nnz(S): S traversals (direct C + reset) in both passes
+                          *   - 4*nnz(S_FF)*nnz(S)/n: common C check + extension (both passes)
+                          * Numerical: nnz(A_F) + 2*(nnz(P)-n_C) + nnz(S_FF) + 2*nnz(S_FF)*nnz(A)/n
+                          *   - nnz(A_F): A traversal for F-rows
+                          *   - 2*(nnz(P)-n_C): Case 1 + normalization (F-rows only)
+                          *   - nnz(S_FF) + 2*nnz(S_FF)*nnz(A)/n: Case 2 sum + distribute */
+               {
+                  HYPRE_Real nnz_A_F = nnz_A * 0.5;  /* estimate */
+                  interp_graph_ops = 4.0 * n_rows + 2.0 * nnz_S + 4.0 * nnz_S_FF * nnz_S / n_rows;
+                  interp_flops = nnz_A_F + 2.0 * (nnz_P - n_C) + nnz_S_FF +
+                                 2.0 * nnz_S_FF * nnz_A / n_rows;
+               }
+               break;
+
+               case 13:  /* FF1 interpolation
+                          * Graph: 4n + 2*nnz(S) + 2*nnz(S_FF)*nnz(S)/n + 2*nnz(S_FF)
+                          *   - 3n: init (hypre_initialize_vecs 2n, P_marker re-init n)
+                          *   - n: C-point processing (2*n_C)
+                          *   - 2*nnz(S): S traversals (direct C + reset) in both passes
+                          *   - 2*nnz(S_FF)*nnz(S)/n: common C check (both passes)
+                          *   - 2*nnz(S_FF): extension loops with early exit (O(1) per F-neighbor)
+                          * Numerical: nnz(A_F) + 2*(nnz(P)-n_C) + nnz(S_FF) + 2*nnz(S_FF)*nnz(A)/n
+                          *   - Same as Type 12 (numerical phase identical) */
+               {
+                  HYPRE_Real nnz_A_F = nnz_A * 0.5;  /* estimate */
+                  interp_graph_ops = 4.0 * n_rows + 2.0 * nnz_S + 2.0 * nnz_S_FF * nnz_S / n_rows +
+                                     2.0 * nnz_S_FF;
+                  interp_flops = nnz_A_F + 2.0 * (nnz_P - n_C) + nnz_S_FF +
+                                 2.0 * nnz_S_FF * nnz_A / n_rows;
+               }
+               break;
+
+               case 14:  /* Extended interpolation
+                          * Graph: 4n + nnz(S) + 2*nnz(S_FF)*nnz(S)/n
+                          *   - 3n: init (hypre_initialize_vecs 2n, P_marker re-init n)
+                          *   - n: C-point processing (2*n_C)
+                          *   - nnz(S): S traversals in both passes (2*nnz(S_F))
+                          *   - 2*nnz(S_FF)*nnz(S)/n: nested distance-2 C traversal (both passes)
+                          * Numerical: nnz(A_F) + 2*(nnz(P)-n_C) + nnz(S_FF) + 2*nnz(S_FF)*nnz(A)/n
+                          *   - nnz(A_F): A traversal for F-rows (including diagonal read)
+                          *   - 2*(nnz(P)-n_C): Case 1 + normalization (F-rows only)
+                          *   - nnz(S_FF) + 2*nnz(S_FF)*nnz(A)/n: Case 2 div + sum + distribute */
+               {
+                  HYPRE_Real nnz_A_F = nnz_A * 0.5;  /* estimate */
+                  interp_graph_ops = 4.0 * n_rows + nnz_S + 2.0 * nnz_S_FF * nnz_S / n_rows;
+                  interp_flops = nnz_A_F + 2.0 * (nnz_P - n_C) + nnz_S_FF +
+                                 2.0 * nnz_S_FF * nnz_A / n_rows;
+               }
+               break;
+
+               case 16:  /* Modular Extended interpolation (Matrix-Matrix approach)
+                          * Graph: 7n + nnz(S) + nnz(S_FF)*nnz(S)/n
+                          *   - 6n: GenerateFFFCHost bookkeeping (5n) + P construction (n)
+                          *   - n: C-point handling
+                          *   - nnz(S): two passes in block extraction (2*nnz(S_F))
+                          *   - nnz(S_FF)*nnz(S)/n: SpGEMM symbolic phase
+                          * Numerical: nnz(A_F) + 2*n_F + 2*nnz(S_F) + nnz(P)
+                          *            + nnz(S_FF)*nnz(S)/n
+                          *   - nnz(A_F): D_w row sums
+                          *   - 2*n_F: beta/gamma divisions
+                          *   - 2*nnz(S_F): D_q adds (nnz(S_FC)) + D_w As_FF subtract (nnz(S_FF))
+                          *                 + As_FF scaling (nnz(S_FF)) + As_FC scaling (nnz(S_FC))
+                          *                 = 2*nnz(S_FC) + 2*nnz(S_FF) = 2*nnz(S_F)
+                          *   - nnz(P): P construction copies
+                          *   - nnz(S_FF)*nnz(S)/n: SpGEMM numeric phase (1 FMA per entry)
+                          * Note: assumes num_functions=1 */
+               {
+                  HYPRE_Real nnz_A_F = nnz_A * 0.5;
+                  HYPRE_Real nnz_S_F = nnz_S * 0.5;
+                  interp_graph_ops = 7.0 * n_rows + nnz_S + nnz_S_FF * nnz_S / n_rows;
+                  interp_flops = nnz_A_F + 2.0 * n_F + 2.0 * nnz_S_F + nnz_P +
+                                 nnz_S_FF * nnz_S / n_rows;
+               }
+               break;
+
+               case 17:  /* Modular Extended+i interpolation (Matrix-Matrix)
+                          * Graph: 7n + nnz(S) + nnz(S_FF)^2/n_F + nnz(S_FF)*nnz(S)/n
+                          *   - 7n + nnz(S) + nnz(S_FF)*nnz(S)/n: same as Type 16
+                          *   - nnz(S_FF)^2/n_F: D_theta reciprocal search (nested loop)
+                          * Numerical: nnz(A_F) + 2*n_F + nnz(S_FC) + 7*nnz(S_FF) + nnz(P)
+                          *            + nnz(S_FF)*nnz(S)/n
+                          *   - nnz(S_FC): D_q row sums
+                          *   - 7*nnz(S_FF): D_w subtract (1) + D_theta (5) + theta scaling (1)
+                          *   - No As_FC scaling (unlike Type 16)
+                          * Note: assumes num_functions=1 */
+               {
+                  HYPRE_Real nnz_A_F = nnz_A * 0.5;
+                  HYPRE_Real nnz_S_FC = (nnz_S - nnz_S_FF) * 0.5;
+                  interp_graph_ops = 7.0 * n_rows + nnz_S + nnz_S_FF * nnz_S_FF / n_F +
+                                     nnz_S_FF * nnz_S / n_rows;
+                  interp_flops = nnz_A_F + 2.0 * n_F + nnz_S_FC + 7.0 * nnz_S_FF + nnz_P +
+                                 nnz_S_FF * nnz_S / n_rows;
+               }
+               break;
+
+               case 18:  /* Modular Extended+e interpolation (Matrix-Matrix)
+                          * Graph: 7n + nnz(S) + nnz(S_FF)*nnz(S)/n
+                          *   - Same as Type 16
+                          * Numerical: nnz(A_F) + 6*n_F + 5*nnz(S_FF) + 2*nnz(S_FC) + nnz(P)
+                          *            + nnz(S_FF)*nnz(S)/n
+                          *   - nnz(A_F): D_w row sums
+                          *   - 6*n_F: D_lambda div + D_tmp (2) + scaling per-row (3)
+                          *   - 5*nnz(S_FF): D_lambda(1) + D_w(1) + D_tau(2) + As_FF scaling(1)
+                          *   - 2*nnz(S_FC): D_beta adds + As_FC scaling
+                          * Note: assumes num_functions=1 */
+               {
+                  HYPRE_Real nnz_A_F = nnz_A * 0.5;
+                  HYPRE_Real nnz_S_FC = (nnz_S - nnz_S_FF) * 0.5;
+                  interp_graph_ops = 7.0 * n_rows + nnz_S + nnz_S_FF * nnz_S / n_rows;
+                  interp_flops = nnz_A_F + 6.0 * n_F + 5.0 * nnz_S_FF + 2.0 * nnz_S_FC + nnz_P +
+                                 nnz_S_FF * nnz_S / n_rows;
+               }
+               break;
+
+               case 4:  /* Multipass interpolation */
+               case 5:  /* Multipass with separation of weights */
+                  /* Graph work:
+                   *   - Pass assignment: nnz(S) * (num_passes+1) / 4 (S_F traversed ~(num_passes+1)/2 times)
+                   *   - Symbolic SpMM: nnz(S) * (num_passes-2)/(num_passes-1) * nnz(P)/n (count + fill)
+                   *   - Marker init: n * num_passes
+                   * Numerical work:
+                   *   - nnz(A_F): A traversal for F-point rows (each F-point processed once)
+                   *   - SpMM: 3 ops per inner iter (1 FMA + 2 adds for sum_C/sum_N)
+                   *   - 2*nnz(P): P init + normalization
+                   *   - n_F: divisions
+                   * Note: When num_passes=2, SpMM terms vanish (all F-points in pass 1) */
+                  {
+                     HYPRE_Int num_passes = hypre_ParAMGDataInterpNumPasses(amg_data)[level];
+                     if (num_passes < 2) { num_passes = 2; }  /* minimum is 2 */
+
+                     /* Compute nnz_A_F: nnz of A restricted to F-point rows */
+                     HYPRE_Real nnz_A_F = 0.0;
+                     if (CF_marker_array && CF_marker_array[level])
+                     {
+                        HYPRE_Int *CF_marker_data = hypre_IntArrayData(CF_marker_array[level]);
+                        hypre_CSRMatrix *A_diag = hypre_ParCSRMatrixDiag(A_array[level]);
+                        hypre_CSRMatrix *A_offd = hypre_ParCSRMatrixOffd(A_array[level]);
+                        HYPRE_Int *A_diag_i = hypre_CSRMatrixI(A_diag);
+                        HYPRE_Int *A_offd_i = hypre_CSRMatrixI(A_offd);
+                        HYPRE_Int n_local = hypre_CSRMatrixNumRows(A_diag);
+                        HYPRE_Int i;
+                        for (i = 0; i < n_local; i++)
+                        {
+                           if (CF_marker_data[i] < 0)  /* F-point */
+                           {
+                              nnz_A_F += (A_diag_i[i + 1] - A_diag_i[i]) +
+                                         (A_offd_i[i + 1] - A_offd_i[i]);
+                           }
+                        }
+                     }
+                     else
+                     {
+                        /* Fallback: estimate as half of nnz_A */
+                        nnz_A_F = nnz_A * 0.5;
+                     }
+
+                     /* SpMM factor: fraction of F-points doing SpMM = (num_passes-2)/(num_passes-1) */
+                     HYPRE_Real spmm_factor = (num_passes > 2) ?
+                        (HYPRE_Real)(num_passes - 2) / (HYPRE_Real)(num_passes - 1) : 0.0;
+
+                     /* Graph: pass assignment + symbolic SpMM + marker init */
+                     interp_graph_ops = nnz_S * (num_passes + 1.0) / 4.0
+                                      + nnz_S * spmm_factor * nnz_P / n_rows
+                                      + n_rows * num_passes;
+
+                     /* Numerical: A traversal + SpMM (FMA+sum_C+sum_N) + P work + divisions */
+                     interp_flops = nnz_A_F
+                                  + 3.0 * nnz_S * spmm_factor * nnz_P / n_rows
+                                  + 2.0 * nnz_P
+                                  + n_F;
+                  }
+                  break;
+
+               case 108:  /* Modified Multipass interpolation (agg_interp_type 8)
+                          * Graph: nnz(S)*(P+1)/4 + nnz(A)/2 + nnz(S)*spmm*nnz(P)/n + n*P
+                          * Numerical: nnz(A_F) + n_F + 2*nnz(S_F) + 2*nnz(S)*spmm*nnz(P)/n
+                          *   - nnz(A_F) - n_F: row sums (off-diagonal A entries)
+                          *   - 2*nnz(S_F): normalization sum_C + scale (on Q, not Pi)
+                          *   - 2*n_F: normalization mul + div per point
+                          *   - 2*nnz(S)*spmm*nnz(P)/n: SpGEMM numeric
+                          * Note: normalization acts on Q (sparse), not SpGEMM result Pi */
+               {
+                  HYPRE_Int num_passes = hypre_ParAMGDataInterpNumPasses(amg_data)[level];
+                  if (num_passes < 2) { num_passes = 2; }
+                  HYPRE_Real nnz_A_F = nnz_A * 0.5;
+                  HYPRE_Real nnz_S_F = nnz_S * 0.5;
+                  HYPRE_Real spmm_factor = (num_passes > 2) ?
+                     (HYPRE_Real)(num_passes - 2) / (HYPRE_Real)(num_passes - 1) : 0.0;
+                  interp_graph_ops = nnz_S * (num_passes + 1.0) / 4.0
+                                   + nnz_A_F
+                                   + nnz_S * spmm_factor * nnz_P / n_rows
+                                   + n_rows * num_passes;
+                  interp_flops = nnz_A_F + n_F + 2.0 * nnz_S_F
+                               + nnz_S * spmm_factor * nnz_P / n_rows;
+               }
+               break;
+
+               case 109:  /* Modified Multipass interpolation, fused (agg_interp_type 9)
+                           * Graph: same as Type 108
+                           * Numerical: 2*nnz(A_F) - nnz(S_F) + 2*nnz(P) + 3*n_F
+                           *            + nnz(S)*spmm*nnz(P)/n
+                           *   - nnz(A_F) - n_F: row sums (partially wasted for passes 2+)
+                           *   - nnz(A_F) - nnz(S_F): w_row_sum in passes 2+ (redundant)
+                           *   - 2*nnz(P): normalization sum_C + scale (on Pi, denser than Q)
+                           *   - 3*n_F: normalization mul + add(w_row_sum) + div per point
+                           *   - nnz(S)*spmm*nnz(P)/n: SpGEMM numeric (FMA) */
+               {
+                  HYPRE_Int num_passes = hypre_ParAMGDataInterpNumPasses(amg_data)[level];
+                  if (num_passes < 2) { num_passes = 2; }
+                  HYPRE_Real nnz_A_F = nnz_A * 0.5;
+                  HYPRE_Real nnz_S_F = nnz_S * 0.5;
+                  HYPRE_Real spmm_factor = (num_passes > 2) ?
+                     (HYPRE_Real)(num_passes - 2) / (HYPRE_Real)(num_passes - 1) : 0.0;
+                  interp_graph_ops = nnz_S * (num_passes + 1.0) / 4.0
+                                   + nnz_A_F
+                                   + nnz_S * spmm_factor * nnz_P / n_rows
+                                   + n_rows * num_passes;
+                  interp_flops = 2.0 * nnz_A_F - nnz_S_F + 2.0 * nnz_P + 3.0 * n_F
+                               + nnz_S * spmm_factor * nnz_P / n_rows;
+               }
+               break;
+
+               case 100:  /* One-point interpolation
+                           * Graph: 2n + nnz(S_F) + 2*nnz(A_F)
+                           *   - n_C: fine_to_coarse assignments
+                           *   - n: Pass 2 row iteration
+                           *   - nnz(S_F): S marker writes
+                           *   - nnz(A_F): strongest C-point search comparisons
+                           *   - nnz(A_F): abs() for magnitude comparison (graph work)
+                           * Numerical: 0
+                           *   - P weights are all 1.0, abs() counted as graph work */
+               {
+                  HYPRE_Real nnz_A_F = nnz_A * 0.5;
+                  HYPRE_Real nnz_S_F = nnz_S * 0.5;
+                  interp_graph_ops = 2.0 * n_rows + nnz_S_F + 2.0 * nnz_A_F;
+                  interp_flops = 0.0;
+               }
+               break;
+
+               case 1:   /* Least-squares interpolation (requires smooth vectors) - not tracked */
+               case 2:   /* Hybrid extended interpolation (hyperbolic/unsymmetric PDEs) - not tracked */
+                  break;
+
+               case 10:  /* Block interpolation types - not tracked */
+               case 11:  /* These operate on ParCSRBlockMatrix (systems of PDEs with */
+               case 20:  /* node-wise DOF ordering and known block size). The algorithms */
+               case 21:  /* are structurally similar to scalar counterparts but involve */
+               case 22:  /* dense block arithmetic (O(b^3) inversions, O(b^2) multiplies). */
+               case 23:  /* Excluded: requires a priori block structure knowledge. */
+               case 24:
+                  break;
+
+               default:
+                  /* Default: 2 * nnz(A) */
+                  interp_flops = 2.0 * nnz_A;
+                  break;
+            }
+
+            hypre_ParAMGDataSetupFlops(amg_data) += interp_flops * blk_mult;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += interp_graph_ops * blk_mult;
+
+            /* For two-stage aggressive coarsening, add P2 (Partial builder) cost.
+             * P2 uses the same algorithm as P1 but only interpolates F2-points
+             * (intermediate C-points that became F in the second coarsening).
+             * We reuse the same formula with P2's dimensions. */
+            if (agg_nnz_P1 > 0.0)
+            {
+               HYPRE_Real p2_flops = 0.0;
+               HYPRE_Real p2_graph = 0.0;
+               HYPRE_Real p2_nnz_P = agg_nnz_P2;
+               HYPRE_Real p2_n_C   = saved_n_C;           /* final coarse grid size */
+               HYPRE_Real p2_n_F   = agg_n_C1 - saved_n_C; /* F2-points */
+               /* Estimate nnz_A restricted to F2-point rows (proportional to F2 fraction) */
+               HYPRE_Real p2_nnz_A_F = (n_rows > 0) ? nnz_A * p2_n_F / n_rows : 0.0;
+               HYPRE_Real p2_nnz_S_F = (n_rows > 0) ? nnz_S * p2_n_F / n_rows : 0.0;
+
+               switch (cur_interp)
+               {
+                  case 0:
+                  case 19:
+                     /* Classical: Graph 3n + nnz(S) + nnz_S_FF*nnz(A)/n,
+                      *   Num: nnz_A_F + 2*(nnz_P-n_C) + 2*nnz_S_FF*nnz(A)/n */
+                     p2_graph = 3.0 * n_rows + nnz_S + nnz_S_FF * nnz_A / n_rows;
+                     p2_flops = p2_nnz_A_F + 2.0 * (p2_nnz_P - p2_n_C) +
+                                2.0 * nnz_S_FF * nnz_A / n_rows;
+                     break;
+                  case 3:
+                  case 15:
+                     /* Direct: Graph 3n + nnz(S), Num: nnz_A_F + n_F + 3*(nnz_P-n_C) */
+                     p2_graph = 3.0 * n_rows + nnz_S;
+                     p2_flops = p2_nnz_A_F + p2_n_F + 3.0 * (p2_nnz_P - p2_n_C);
+                     break;
+                  case 6:
+                     /* Ext+i: Graph 5n + nnz(S) + 2*nnz_S_FF*nnz(S)/n,
+                      *   Num: nnz_A_F + 2*nnz_S_FF*nnz(A)/n + nnz_P - n_C */
+                     p2_graph = 5.0 * n_rows + nnz_S + 2.0 * nnz_S_FF * nnz_S / n_rows;
+                     p2_flops = p2_nnz_A_F + 2.0 * nnz_S_FF * nnz_A / n_rows +
+                                p2_nnz_P - p2_n_C;
+                     break;
+                  case 8:
+                  case 9:
+                     /* Standard: Graph 6n + nnz(S) + 2*nnz_S_FF*nnz(S)/n + nnz_P + nnz_A_F,
+                      *   Num: 2*nnz_A_F + nnz_S_FF*nnz(A)/n + nnz_P - n_C */
+                     p2_graph = 6.0 * n_rows + nnz_S + 2.0 * nnz_S_FF * nnz_S / n_rows +
+                                p2_nnz_P + p2_nnz_A_F;
+                     p2_flops = 2.0 * p2_nnz_A_F + nnz_S_FF * nnz_A / n_rows +
+                                p2_nnz_P - p2_n_C;
+                     break;
+                  case 14:
+                     /* Extended: Graph 4n + nnz(S) + 2*nnz_S_FF*nnz(S)/n,
+                      *   Num: nnz_A_F + 2*(nnz_P-n_C) + nnz_S_FF + 2*nnz_S_FF*nnz(A)/n */
+                     p2_graph = 4.0 * n_rows + nnz_S + 2.0 * nnz_S_FF * nnz_S / n_rows;
+                     p2_flops = p2_nnz_A_F + 2.0 * (p2_nnz_P - p2_n_C) + nnz_S_FF +
+                                2.0 * nnz_S_FF * nnz_A / n_rows;
+                     break;
+                  case 16:
+                     /* ModExt: Graph 7n + nnz(S) + nnz_S_FF*nnz(S)/n,
+                      *   Num: nnz_A_F + 2*n_F + 2*nnz_S_F + nnz_P + nnz_S_FF*nnz(S)/n */
+                     p2_graph = 7.0 * n_rows + nnz_S + nnz_S_FF * nnz_S / n_rows;
+                     p2_flops = p2_nnz_A_F + 2.0 * p2_n_F + 2.0 * p2_nnz_S_F +
+                                p2_nnz_P + nnz_S_FF * nnz_S / n_rows;
+                     break;
+                  case 17:
+                  {
+                     /* ModExt+i: Graph 7n + nnz(S) + nnz_S_FF^2/n_F + nnz_S_FF*nnz(S)/n,
+                      *   Num: nnz_A_F + 2*n_F + nnz_S_FC + 7*nnz_S_FF + nnz_P + nnz_S_FF*nnz(S)/n */
+                     HYPRE_Real p2_nnz_S_FC = (nnz_S - nnz_S_FF) * 0.5;
+                     p2_graph = 7.0 * n_rows + nnz_S + nnz_S_FF * nnz_S_FF / p2_n_F +
+                                nnz_S_FF * nnz_S / n_rows;
+                     p2_flops = p2_nnz_A_F + 2.0 * p2_n_F + p2_nnz_S_FC +
+                                7.0 * nnz_S_FF + p2_nnz_P + nnz_S_FF * nnz_S / n_rows;
+                  }
+                  break;
+                  case 18:
+                  {
+                     /* ModExt+e: Graph 7n + nnz(S) + nnz_S_FF*nnz(S)/n,
+                      *   Num: nnz_A_F + 6*n_F + 5*nnz_S_FF + 2*nnz_S_FC + nnz_P + nnz_S_FF*nnz(S)/n */
+                     HYPRE_Real p2_nnz_S_FC = (nnz_S - nnz_S_FF) * 0.5;
+                     p2_graph = 7.0 * n_rows + nnz_S + nnz_S_FF * nnz_S / n_rows;
+                     p2_flops = p2_nnz_A_F + 6.0 * p2_n_F + 5.0 * nnz_S_FF +
+                                2.0 * p2_nnz_S_FC + p2_nnz_P + nnz_S_FF * nnz_S / n_rows;
+                  }
+                  break;
+                  default:
+                     p2_flops = 2.0 * nnz_A;
+                     break;
+               }
+               hypre_ParAMGDataSetupFlops(amg_data) += p2_flops * blk_mult;
+               hypre_ParAMGDataSetupGraphOps(amg_data) += p2_graph * blk_mult;
+            }
+
+            /* Non-aggressive interpolation truncation cost.
+             * When trunc_factor or P_max_elmts are nonzero, the interpolation
+             * builder internally calls hypre_BoomerAMGInterpTruncation.
+             * (Aggressive-path truncation of the composed P=P1*P2 is already
+             * counted inline at the composition site.)
+             * Use post-truncation nnz(P) as an approximation for pre-truncation
+             * nnz, since truncation typically removes few entries. */
+            if (level >= agg_num_levels &&
+                (trunc_factor != 0.0 || P_max_elmts > 0))
+            {
+               /* Restore nnz_P to final P values (may have been overridden for P1) */
+               HYPRE_Real trunc_nnz = saved_nnz_P;
+               HYPRE_Real trunc_n   = n_rows;
+               hypre_ParAMGDataSetupFlops(amg_data) += (trunc_nnz + trunc_n) * blk_mult;
+               hypre_ParAMGDataSetupGraphOps(amg_data) += 2.0 * trunc_nnz * blk_mult;
+            }
+         }
+
          HYPRE_ANNOTATE_REGION_END("%s", "Interpolation");
       } /* end of if max_levels > 1 */
 
@@ -2562,6 +3708,71 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                                         dof_func_data,
                                         hypre_IntArrayData(CF_marker_array[level]),
                                         level);
+
+         /* RefineInterp cost model (per iteration).
+          *
+          * Algorithm: For each fine row i, loops over A[i,j]:
+          *   Case 1 (j coarse): linear search P[i] for matching col, add a_ij
+          *   Case 2 (j fine):   nested search P[j] x P[i] for matching cols (sum phase),
+          *                      then nested search P[i] x P[j] (distribute phase)
+          *   Final: divide each P[i,k] by -A[i,i]
+          *
+          * Assumptions:
+          *   (A1) nnz(A) distributes uniformly across rows: nnz(A_F) ~ nnz(A)*n_F/n
+          *   (A2) Fine-to-fine fraction: nnz(A_FF) ~ nnz(A_F)*n_F/n = nnz(A)*(n_F/n)^2
+          *        Fine-to-coarse fraction: nnz(A_FC) ~ nnz(A_F)*n_C/n = nnz(A)*n_F*n_C/n^2
+          *   (A3) P row density is uniform: avg_P ~ nnz(P)/n_F
+          *   (A4) Linear search cost is avg_P/2 on average (uniform hit position)
+          *   (A5) Nested search: each P[j] entry searched against all P[i],
+          *        cost = nnz(P_j)*nnz(P_i) ~ avg_P^2 per A_FF entry
+          *   (A6) Matches in nested search ~ avg_P (each P[j] entry finds ~1 match)
+          *   (A7) num_functions=1 assumed; with num_functions>1 effective nnz(A) is
+          *        smaller but we use full count as upper bound
+          *
+          * Graph ops (per iteration):
+          *   Case 1 search:  nnz(A_FC) * avg_P/2             [A1,A2,A4]
+          *   Case 2 sum:     nnz(A_FF) * avg_P^2             [A1,A2,A5]
+          *   Case 2 distrib: nnz(A_FF) * avg_P^2             [A1,A2,A5]
+          *   Normalize loop: nnz(P)
+          *   Total: nnz(A_FC)*avg_P/2 + 2*nnz(A_FF)*avg_P^2 + nnz(P)
+          *
+          * FMA ops (per iteration):
+          *   Case 1 adds:    nnz(A_FC)                        (one += per hit)
+          *   Case 2 sum:     nnz(A_FF) * avg_P               [A6]
+          *   Case 2 distrib: nnz(A_FF) * avg_P * 3           [A6: mul + div + add]
+          *   Fine row init:  nnz(P)                           (sum orig P entries)
+          *   Normalize:      nnz(P)                           (divide by diagonal)
+          *   Total: nnz(A_FC) + 4*nnz(A_FF)*avg_P + 2*nnz(P)
+          */
+         {
+            HYPRE_Real ri_n = (HYPRE_Real) fine_size;
+            HYPRE_Real ri_n_C = (HYPRE_Real) coarse_size;
+            HYPRE_Real ri_n_F = ri_n - ri_n_C;
+            HYPRE_Real ri_nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+               hypre_ParCSRMatrixDiag(A_array[level])) + hypre_CSRMatrixNumNonzeros(
+               hypre_ParCSRMatrixOffd(A_array[level])));
+            HYPRE_Real ri_nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+               hypre_ParCSRMatrixDiag(P)) + hypre_CSRMatrixNumNonzeros(
+               hypre_ParCSRMatrixOffd(P)));
+
+            if (ri_n > 0 && ri_n_F > 0)
+            {
+               HYPRE_Real ri_ratio_F = ri_n_F / ri_n;
+               HYPRE_Real ri_nnz_A_FF = ri_nnz_A * ri_ratio_F * ri_ratio_F;     /* [A1,A2] */
+               HYPRE_Real ri_nnz_A_FC = ri_nnz_A * ri_ratio_F * (ri_n_C / ri_n); /* [A1,A2] */
+               HYPRE_Real ri_avg_P = ri_nnz_P / ri_n_F;                          /* [A3] */
+
+               HYPRE_Real ri_graph = ri_nnz_A_FC * ri_avg_P * 0.5               /* Case 1 [A4] */
+                                   + 2.0 * ri_nnz_A_FF * ri_avg_P * ri_avg_P    /* Case 2 [A5] */
+                                   + ri_nnz_P;                                    /* normalize */
+               HYPRE_Real ri_fma   = ri_nnz_A_FC                                 /* Case 1 adds */
+                                   + 4.0 * ri_nnz_A_FF * ri_avg_P               /* Case 2 [A6] */
+                                   + 2.0 * ri_nnz_P;                             /* init + norm */
+
+               hypre_ParAMGDataSetupGraphOps(amg_data) += ri_graph * (HYPRE_Real) interp_refine;
+               hypre_ParAMGDataSetupFlops(amg_data) += ri_fma * (HYPRE_Real) interp_refine;
+            }
+         }
       }
 
       /*  Post processing of interpolation operators to incorporate
@@ -2709,6 +3920,29 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                                       level, jacobi_trunc_threshold, 0.5 * jacobi_trunc_threshold );
       }
 
+      /* Jacobi interpolation post-processing cost:
+         Per iteration: SpGEMM C=A_F*P (dominant), diagonal scaling, subtraction, truncation.
+         Uses nnz(C) ≈ nnz(P) and nnz(Pnew) ≈ nnz(P) approximations (intermediate
+         matrices not accessible from call site). See docs for detailed breakdown. */
+      if (post_interp_type > 0)
+      {
+         /* Compute nnz from local CSR data (global num_nonzeros may not be set for P) */
+         hypre_CSRMatrix *A_diag_ji = hypre_ParCSRMatrixDiag(A_array[level]);
+         hypre_CSRMatrix *A_offd_ji = hypre_ParCSRMatrixOffd(A_array[level]);
+         hypre_CSRMatrix *P_diag_ji = hypre_ParCSRMatrixDiag(P);
+         hypre_CSRMatrix *P_offd_ji = hypre_ParCSRMatrixOffd(P);
+         HYPRE_Real ji_nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(A_diag_ji) +
+                                              hypre_CSRMatrixNumNonzeros(A_offd_ji));
+         HYPRE_Real ji_nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(P_diag_ji) +
+                                              hypre_CSRMatrixNumNonzeros(P_offd_ji));
+         HYPRE_Real ji_n     = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+         HYPRE_Real ji_iters = (HYPRE_Real) post_interp_type;
+         hypre_ParAMGDataSetupFlops(amg_data) +=
+            ji_iters * (0.5 * ji_nnz_A * ji_nnz_P / ji_n + 6.0 * ji_nnz_P);
+         hypre_ParAMGDataSetupGraphOps(amg_data) +=
+            ji_iters * (ji_nnz_A * ji_nnz_P / ji_n + 0.5 * ji_nnz_A + 6.0 * ji_nnz_P);
+      }
+
       dof_func_data = NULL;
       if (dof_func_array[level + 1])
       {
@@ -2738,12 +3972,27 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   {
                      hypre_VectorData(d_diag)[i] = lvl_data[lvl_i[i]] * w_inv;
                   }
+                  /* Jacobi diagonal extraction: n muls (diag * w_inv), n graph (index lookups) */
+                  {
+                     HYPRE_Real jac_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+                     hypre_ParAMGDataSetupFlops(amg_data) += jac_n;
+                     hypre_ParAMGDataSetupGraphOps(amg_data) += jac_n;
+                  }
                }
                else
                {
                   HYPRE_Real *d_diag_data = NULL;
 
                   hypre_ParCSRComputeL1Norms(A_array[level], 1, NULL, &d_diag_data);
+                  /* L1 norm option 1: nnz abs-adds (negate for neg-def is no-op for SPD)
+                   * Graph: nnz (abs per entry) + n (diag extraction for neg-def check) */
+                  {
+                     HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+                     HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[level])) +
+                                                   hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[level])));
+                     hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz;
+                     hypre_ParAMGDataSetupGraphOps(amg_data) += l1_nnz + l1_n;
+                  }
 
                   hypre_VectorData(d_diag) = d_diag_data;
                   hypre_SeqVectorInitialize_v2(d_diag, hypre_ParCSRMatrixMemoryLocation(A_array[level]));
@@ -2766,6 +4015,20 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   hypre_ParCSRMatrixAminvDB(P, Q, hypre_VectorData(d_diag), &P_array[level]);
                   A_H = hypre_ParTMatmul(P, Q);
                }
+               /* AminvDB cost: P_new = P - D^{-1} * Q
+                * Numerical: n (inversions) + nnz(Q) (scaled subtractions)
+                * Graph: n (marker init) + nnz(P) (copy into C) + nnz(Q) (merge Q entries) */
+               {
+                  HYPRE_Real aminvdb_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+                  HYPRE_Real aminvdb_nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixDiag(P)) + hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixOffd(P)));
+                  HYPRE_Real aminvdb_nnz_Q = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixDiag(Q)) + hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixOffd(Q)));
+                  hypre_ParAMGDataSetupFlops(amg_data) += aminvdb_n + aminvdb_nnz_Q;
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += aminvdb_n + aminvdb_nnz_P + aminvdb_nnz_Q;
+               }
                if (num_procs > 1)
                {
                   hypre_MatvecCommPkgCreate(A_H);
@@ -2779,11 +4042,33 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                {
                   /* Build Non-Galerkin Coarse Grid */
                   hypre_ParCSRMatrix *Q = NULL;
-                  hypre_BoomerAMGBuildNonGalerkinCoarseOperator(&A_H, Q,
-                                                                0.333 * strong_threshold, max_row_sum, num_functions,
-                                                                dof_func_data, hypre_IntArrayData(CF_marker_array[level]),
-                                                                /* nongalerk_tol, sym_collapse, lump_percent, beta );*/
-                                                                nongalerk_tol_l,      1,            0.5,    1.0 );
+                  {
+                     HYPRE_Real ng_nnz_RAP = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(A_H)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(A_H)));
+                     /* AP not available (Q=NULL in ns==1 path), approximate nnz(AP) ≈ nnz(RAP) */
+                     HYPRE_Real ng_nnz_AP = ng_nnz_RAP;
+                     HYPRE_Real ng_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_H);
+
+                     hypre_BoomerAMGBuildNonGalerkinCoarseOperator(&A_H, Q,
+                        0.333 * strong_threshold, max_row_sum, num_functions,
+                        dof_func_data, hypre_IntArrayData(CF_marker_array[level]),
+                        nongalerk_tol_l, 1, 0.5, 1.0);
+
+                     /* NonGalerkin work counting (approximate, see assumptions at site 3) */
+                     {
+                        HYPRE_Real ng_nnz_after = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                           hypre_ParCSRMatrixDiag(A_H)) + hypre_CSRMatrixNumNonzeros(
+                           hypre_ParCSRMatrixOffd(A_H)));
+                        HYPRE_Real ng_f = (ng_nnz_RAP > 0) ?
+                           1.0 - ng_nnz_after / ng_nnz_RAP : 0.0;
+                        HYPRE_Real ng_avg_nnz_S = (ng_n > 0) ? ng_nnz_RAP / ng_n : 0.0;
+                        HYPRE_Real ng_avg_nnz_P = (ng_n > 0) ? (ng_nnz_RAP + ng_nnz_AP) / ng_n : 0.0;
+                        HYPRE_Real ng_elim_cost = ng_f * ng_nnz_RAP * (ng_avg_nnz_S + ng_avg_nnz_P);
+                        hypre_ParAMGDataSetupFlops(amg_data) += ng_nnz_RAP + ng_n + ng_elim_cost;
+                        hypre_ParAMGDataSetupGraphOps(amg_data) += ng_nnz_RAP + ng_nnz_AP + ng_n + ng_elim_cost;
+                     }
+                  }
 
                   hypre_ParCSRMatrixColStarts(P_array[level])[0] = hypre_ParCSRMatrixRowStarts(A_H)[0];
                   hypre_ParCSRMatrixColStarts(P_array[level])[1] = hypre_ParCSRMatrixRowStarts(A_H)[1];
@@ -2826,11 +4111,34 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   }
 
                   /* Build Non-Galerkin Coarse Grid */
-                  hypre_BoomerAMGBuildNonGalerkinCoarseOperator(&A_H, Q,
-                                                                0.333 * strong_threshold, max_row_sum, num_functions,
-                                                                dof_func_data, hypre_IntArrayData(CF_marker_array[level]),
-                                                                /* nongalerk_tol, sym_collapse, lump_percent, beta );*/
-                                                                nongalerk_tol_l,      1,            0.5,    1.0 );
+                  {
+                     HYPRE_Real ng_nnz_RAP = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(A_H)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(A_H)));
+                     HYPRE_Real ng_nnz_AP = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(Q)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(Q)));
+                     HYPRE_Real ng_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_H);
+
+                     hypre_BoomerAMGBuildNonGalerkinCoarseOperator(&A_H, Q,
+                        0.333 * strong_threshold, max_row_sum, num_functions,
+                        dof_func_data, hypre_IntArrayData(CF_marker_array[level]),
+                        nongalerk_tol_l, 1, 0.5, 1.0);
+
+                     /* NonGalerkin work counting (approximate, see assumptions at site 3) */
+                     {
+                        HYPRE_Real ng_nnz_after = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                           hypre_ParCSRMatrixDiag(A_H)) + hypre_CSRMatrixNumNonzeros(
+                           hypre_ParCSRMatrixOffd(A_H)));
+                        HYPRE_Real ng_f = (ng_nnz_RAP > 0) ?
+                           1.0 - ng_nnz_after / ng_nnz_RAP : 0.0;
+                        HYPRE_Real ng_avg_nnz_S = (ng_n > 0) ? ng_nnz_RAP / ng_n : 0.0;
+                        HYPRE_Real ng_avg_nnz_P = (ng_n > 0) ? (ng_nnz_RAP + ng_nnz_AP) / ng_n : 0.0;
+                        HYPRE_Real ng_elim_cost = ng_f * ng_nnz_RAP * (ng_avg_nnz_S + ng_avg_nnz_P);
+                        hypre_ParAMGDataSetupFlops(amg_data) += ng_nnz_RAP + ng_n + ng_elim_cost;
+                        hypre_ParAMGDataSetupGraphOps(amg_data) += ng_nnz_RAP + ng_nnz_AP + ng_n + ng_elim_cost;
+                     }
+                  }
 
                   if (!hypre_ParCSRMatrixCommPkg(A_H))
                   {
@@ -2884,6 +4192,27 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                {
                   C = hypre_CreateC(A_array[level], add_rlx_wt);
                }
+               /* CreateC cost: C = I - w * D^{-1} * A (row-scale of A)
+                * w != 0 (Jacobi): n divisions + (nnz-n) muls = nnz FMAs,
+                *                   n (diag lookup) + nnz (col index copy) graph ops.
+                * w == 0 (L1 Jacobi): nnz adds (row norms) + 2n (div+sub per row)
+                *     + (nnz-n) muls = 2*nnz+n FMA; nnz (abs) + n (diag lookup) graph. */
+               {
+                  HYPRE_Real cc_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixDiag(A_array[level])) + hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixOffd(A_array[level])));
+                  HYPRE_Real cc_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+                  if (add_rlx == 18)
+                  {
+                     hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * cc_nnz + cc_n;
+                     hypre_ParAMGDataSetupGraphOps(amg_data) += cc_nnz + cc_n;
+                  }
+                  else
+                  {
+                     hypre_ParAMGDataSetupFlops(amg_data) += cc_nnz;
+                     hypre_ParAMGDataSetupGraphOps(amg_data) += cc_n + cc_nnz;
+                  }
+               }
 
                Ptmp = P;
                while (ns_tmp > 0)
@@ -2898,6 +4227,22 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   {
                      Ptmp = hypre_ParMatmul(C, Pnew);
                   }
+                  /* C*P SpGEMM cost: nnz(C) * nnz(Pnew) / n, equal for FMA and graph */
+                  {
+                     HYPRE_Real cp_nnz_C = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(C)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(C)));
+                     HYPRE_Real cp_nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixDiag(Pnew)) + hypre_CSRMatrixNumNonzeros(
+                        hypre_ParCSRMatrixOffd(Pnew)));
+                     HYPRE_Real cp_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(C);
+                     if (cp_n > 0)
+                     {
+                        HYPRE_Real cp_cost = cp_nnz_C * cp_nnz_P / cp_n;
+                        hypre_ParAMGDataSetupFlops(amg_data) += cp_cost;
+                        hypre_ParAMGDataSetupGraphOps(amg_data) += cp_cost;
+                     }
+                  }
                   if (ns_tmp < ns)
                   {
                      hypre_ParCSRMatrixDestroy(Pnew);
@@ -2908,11 +4253,48 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                P_array[level] = Pnew;
                hypre_ParCSRMatrixDestroy(C);
             } /* if (ns == 1) */
+
+            /* Accumulate RAP cost for additive AMG path
+             * Two SpGEMMs: Q = A*P, then A_H = P^T*Q
+             * Graph + Numerical: nnz(A)*nnz(P)/n + nnz(P)*nnz(A)/n = 2*nnz(A)*nnz(P)/n */
+            if (P_array[level] != NULL)
+            {
+               /* Compute nnz from local CSR data (global num_nonzeros may not be set) */
+               hypre_CSRMatrix *A_diag_add = hypre_ParCSRMatrixDiag(A_array[level]);
+               hypre_CSRMatrix *A_offd_add = hypre_ParCSRMatrixOffd(A_array[level]);
+               hypre_CSRMatrix *P_diag_add = hypre_ParCSRMatrixDiag(P_array[level]);
+               hypre_CSRMatrix *P_offd_add = hypre_ParCSRMatrixOffd(P_array[level]);
+               HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(A_diag_add) +
+                                                hypre_CSRMatrixNumNonzeros(A_offd_add));
+               HYPRE_Real nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(P_diag_add) +
+                                                hypre_CSRMatrixNumNonzeros(P_offd_add));
+               HYPRE_BigInt n_rows = hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+               HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+               if (n_rows > 0)
+               {
+                  HYPRE_Real rap_cost = 2.0 * nnz_A * nnz_P / (HYPRE_Real) n_rows;
+                  hypre_ParAMGDataSetupFlops(amg_data) += rap_cost * blk_mult;
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += rap_cost * blk_mult;
+               }
+            }
+
             HYPRE_ANNOTATE_REGION_END("%s", "RAP");
 
             if (add_P_max_elmts || add_trunc_factor != 0.0)
             {
                hypre_BoomerAMGTruncandBuild(P_array[level], add_trunc_factor, add_P_max_elmts);
+
+               /* Truncation cost: abs + max search per row, rescale survivors.
+                * FMA: nnz(P) (row sums) + n (divisions for rescaling)
+                * Graph: 2*nnz(P) (abs per entry + max search per entry) */
+               {
+                  HYPRE_Real trunc_nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixDiag(P_array[level])) + hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixOffd(P_array[level])));
+                  HYPRE_Real trunc_n_P = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(P_array[level]);
+                  hypre_ParAMGDataSetupFlops(amg_data) += trunc_nnz_P + trunc_n_P;
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += 2.0 * trunc_nnz_P;
+               }
             }
             /*else
                 hypre_MatvecCommPkgCreate(P_array[level]);  */
@@ -2989,11 +4371,39 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
             }
 
             /* Build Non-Galerkin Coarse Grid */
-            hypre_BoomerAMGBuildNonGalerkinCoarseOperator(&A_H, Q,
-                                                          0.333 * strong_threshold, max_row_sum, num_functions,
-                                                          dof_func_data, hypre_IntArrayData(CF_marker_array[level]),
-                                                          /* nongalerk_tol, sym_collapse, lump_percent, beta );*/
-                                                          nongalerk_tol_l,      1,            0.5,    1.0 );
+            {
+               /* Capture nnz(RAP) before NonGalerkin modifies A_H */
+               HYPRE_Real ng_nnz_RAP = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                  hypre_ParCSRMatrixDiag(A_H)) + hypre_CSRMatrixNumNonzeros(
+                  hypre_ParCSRMatrixOffd(A_H)));
+               HYPRE_Real ng_nnz_AP = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                  hypre_ParCSRMatrixDiag(Q)) + hypre_CSRMatrixNumNonzeros(
+                  hypre_ParCSRMatrixOffd(Q)));
+               HYPRE_Real ng_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_H);
+
+               hypre_BoomerAMGBuildNonGalerkinCoarseOperator(&A_H, Q,
+                  0.333 * strong_threshold, max_row_sum, num_functions,
+                  dof_func_data, hypre_IntArrayData(CF_marker_array[level]),
+                  nongalerk_tol_l, 1, 0.5, 1.0);
+
+               /* NonGalerkin work counting (approximate):
+                * Assumptions: avg_nnz_S ≈ nnz(RAP)/n, avg_nnz_Pattern ≈ (nnz(RAP)+nnz(AP))/n,
+                * f = fraction of entries dropped, estimated from nnz change.
+                * FMA: nnz(RAP)+n (SOC) + f*nnz(RAP)*(avg_nnz_S + avg_nnz_P) (intersect+lump)
+                * Graph: nnz(RAP)+nnz(AP)+n (SOC+pattern) + f*nnz(RAP)*(avg_nnz_S+avg_nnz_P) */
+               {
+                  HYPRE_Real ng_nnz_after = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixDiag(A_H)) + hypre_CSRMatrixNumNonzeros(
+                     hypre_ParCSRMatrixOffd(A_H)));
+                  HYPRE_Real ng_f = (ng_nnz_RAP > 0) ?
+                     1.0 - ng_nnz_after / ng_nnz_RAP : 0.0;
+                  HYPRE_Real ng_avg_nnz_S = (ng_n > 0) ? ng_nnz_RAP / ng_n : 0.0;
+                  HYPRE_Real ng_avg_nnz_P = (ng_n > 0) ? (ng_nnz_RAP + ng_nnz_AP) / ng_n : 0.0;
+                  HYPRE_Real ng_elim_cost = ng_f * ng_nnz_RAP * (ng_avg_nnz_S + ng_avg_nnz_P);
+                  hypre_ParAMGDataSetupFlops(amg_data) += ng_nnz_RAP + ng_n + ng_elim_cost;
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += ng_nnz_RAP + ng_nnz_AP + ng_n + ng_elim_cost;
+               }
+            }
 
             if (!hypre_ParCSRMatrixCommPkg(A_H))
             {
@@ -3080,6 +4490,44 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       hypre_ParCSRMatrixPrintIJ(P_array[level], 0, 0, file);
 #endif
 
+      /* Accumulate RAP (Galerkin triple product) cost
+       * Two SpGEMMs: Q = A*P, then A_H = R*Q (R = P^T in standard Galerkin)
+       * Graph (symbolic): nnz(A)*nnz(P)/n + nnz(R)*nnz(Q)/n ≈ 2*nnz(A)*nnz(P)/n
+       * Numerical (FMA):  nnz(A)*nnz(P)/n + nnz(R)*nnz(Q)/n ≈ 2*nnz(A)*nnz(P)/n
+       * Uses nnz(Q) ≈ nnz(A) and nnz(R) = nnz(P) for R = P^T */
+      if (P_array[level] != NULL)
+      {
+         /* Compute nnz from local CSR data (global num_nonzeros may not be set) */
+         hypre_CSRMatrix *A_diag_rap = hypre_ParCSRMatrixDiag(A_array[level]);
+         hypre_CSRMatrix *A_offd_rap = hypre_ParCSRMatrixOffd(A_array[level]);
+         hypre_CSRMatrix *P_diag_rap = hypre_ParCSRMatrixDiag(P_array[level]);
+         hypre_CSRMatrix *P_offd_rap = hypre_ParCSRMatrixOffd(P_array[level]);
+         HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(A_diag_rap) +
+                                          hypre_CSRMatrixNumNonzeros(A_offd_rap));
+         HYPRE_Real nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(P_diag_rap) +
+                                          hypre_CSRMatrixNumNonzeros(P_offd_rap));
+         HYPRE_Real nnz_R = nnz_P;  /* Default for R = P^T */
+         if (restri_type && R_array[level] != NULL)
+         {
+            hypre_CSRMatrix *R_diag_rap = hypre_ParCSRMatrixDiag(R_array[level]);
+            hypre_CSRMatrix *R_offd_rap = hypre_ParCSRMatrixOffd(R_array[level]);
+            nnz_R = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(R_diag_rap) +
+                                  hypre_CSRMatrixNumNonzeros(R_offd_rap));
+         }
+
+         /* R = P^T transpose construction: nnz(P) graph ops for CSR transpose */
+         hypre_ParAMGDataSetupGraphOps(amg_data) += nnz_P;
+
+         HYPRE_BigInt n_rows = hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+         HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
+         if (n_rows > 0)
+         {
+            HYPRE_Real rap_cost = (nnz_A * nnz_P + nnz_R * nnz_A) / (HYPRE_Real) n_rows;
+            hypre_ParAMGDataSetupFlops(amg_data) += rap_cost * blk_mult;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += rap_cost * blk_mult;
+         }
+      }
+
       HYPRE_ANNOTATE_REGION_END("%s", "RAP");
       if (debug_flag == 1)
       {
@@ -3101,6 +4549,33 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          /* dropping in A_H */
          hypre_ParCSRMatrixDropSmallEntries(A_H, hypre_ParAMGDataADropTol(amg_data),
                                             hypre_ParAMGDataADropType(amg_data));
+         /* FLOP and graph ops for DropSmallEntries (only when ADropTol > 0):
+          * Row norm computation varies by type:
+          *   Type 1 (L1): Numerical: nnz adds + n muls = nnz + n; Graph: nnz abs
+          *   Type 2 (L2): Numerical: 2*nnz (mul+add) + 2n sqrt+mul; Graph: nnz abs (threshold compare)
+          *   Type inf:    Numerical: n muls; Graph: nnz abs (max search)
+          */
+         if (hypre_ParAMGDataADropTol(amg_data) > 0.0)
+         {
+            HYPRE_Int drop_type = hypre_ParAMGDataADropType(amg_data);
+            HYPRE_Real n_H = (HYPRE_Real) hypre_CSRMatrixNumRows(hypre_ParCSRMatrixDiag(A_H));
+            HYPRE_Real nnz_H = (HYPRE_Real) hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_H));
+            if (drop_type == 1)
+            {
+               hypre_ParAMGDataSetupFlops(amg_data) += nnz_H + n_H;
+               hypre_ParAMGDataSetupGraphOps(amg_data) += nnz_H;
+            }
+            else if (drop_type == 2)
+            {
+               hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * nnz_H + 2.0 * n_H;
+               hypre_ParAMGDataSetupGraphOps(amg_data) += nnz_H;
+            }
+            else
+            {
+               hypre_ParAMGDataSetupFlops(amg_data) += n_H;
+               hypre_ParAMGDataSetupGraphOps(amg_data) += nnz_H;
+            }
+         }
          /* if CommPkg for A_H was not built */
          if (num_procs > 1 && hypre_ParCSRMatrixCommPkg(A_H) == NULL)
          {
@@ -3169,6 +4644,13 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       if (coarse_size <= coarse_threshold)
       {
          hypre_GaussElimSetup(amg_data, level, grid_relax_type[3]);
+
+         /* Accumulate GE setup FLOP cost: O(n³) for LU factorization
+          * Dense n×n matrix factorization costs ~(1/3)n³ FMAs */
+         {
+            HYPRE_Real n = (HYPRE_Real) coarse_size;
+            hypre_ParAMGDataSetupFlops(amg_data) += (1.0 / 3.0) * n * n * n;
+         }
       }
       else
       {
@@ -3270,6 +4752,12 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
    {
       smoother = hypre_CTAlloc(HYPRE_Solver, num_levels, HYPRE_MEMORY_HOST);
       hypre_ParAMGDataSmoother(amg_data) = smoother;
+      /* Allocate per-level solve flops array for smoothers */
+      if (!hypre_ParAMGDataSmootherSolveFlops(amg_data))
+      {
+         hypre_ParAMGDataSmootherSolveFlops(amg_data) =
+            hypre_CTAlloc(HYPRE_Real, num_levels, HYPRE_MEMORY_HOST);
+      }
    }
 
    if (addlvl == -1)
@@ -3303,12 +4791,26 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          {
             hypre_ParCSRComputeL1Norms(A_array[j], 4, NULL, &l1_norm_data);
          }
+         /* L1 norm option 4: n mul (truncation only)
+          * Graph: n (diag search) + n (abs) + n (neg-def diag extraction) = 3n */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_n;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += 3.0 * l1_n;
+         }
       }
       else if (j == num_levels - 1 &&
                (grid_relax_type[3] == 8  || grid_relax_type[3] == 89 ||
                 grid_relax_type[3] == 13 || grid_relax_type[3] == 14))
       {
          hypre_ParCSRComputeL1Norms(A_array[j], 4, NULL, &l1_norm_data);
+         /* L1 norm option 4: n mul (truncation only)
+          * Graph: n (diag search) + n (abs) + n (neg-def diag extraction) = 3n */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_n;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += 3.0 * l1_n;
+         }
       }
 
       if (j < num_levels - 1 && (grid_relax_type[1] == 30 || grid_relax_type[2] == 30))
@@ -3321,10 +4823,28 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          {
             hypre_ParCSRComputeL1Norms(A_array[j], 3, NULL, &l1_norm_data);
          }
+         /* L1 norm option 3: nnz FMAs (a_ij^2 accumulation)
+          * Graph: n (diag extraction for neg-def check; negate/abs no-op for SPD) */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += l1_n;
+         }
       }
       else if (j == num_levels - 1 && grid_relax_type[3] == 30)
       {
          hypre_ParCSRComputeL1Norms(A_array[j], 3, NULL, &l1_norm_data);
+         /* L1 norm option 3: nnz FMAs (a_ij^2 accumulation)
+          * Graph: n (diag extraction for neg-def check; negate/abs no-op for SPD) */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += l1_n;
+         }
       }
 
       if (j < num_levels - 1 && (grid_relax_type[1] == 88 || grid_relax_type[2] == 88 ))
@@ -3337,10 +4857,30 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          {
             hypre_ParCSRComputeL1Norms(A_array[j], 6, NULL, &l1_norm_data);
          }
+         /* L1 norm option 6: 0.5*(d + l + sqrt(d^2 + l^2)) per row
+          * Numerical: nnz abs-adds for off-diag l1 + 7n (2 squares + sqrt + 3 adds + 1 mul per row)
+          * Graph: n (diag lookup) + n (abs) + n (neg-def diag extraction) = 3n */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz + 7.0 * l1_n;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += 3.0 * l1_n;
+         }
       }
       else if (j == num_levels - 1 && (grid_relax_type[3] == 88))
       {
          hypre_ParCSRComputeL1Norms(A_array[j], 6, NULL, &l1_norm_data);
+         /* L1 norm option 6: 0.5*(d + l + sqrt(d^2 + l^2)) per row
+          * Numerical: nnz abs-adds for off-diag l1 + 7n (2 squares + sqrt + 3 adds + 1 mul per row)
+          * Graph: n (diag lookup) + n (abs) + n (neg-def diag extraction) = 3n */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz + 7.0 * l1_n;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += 3.0 * l1_n;
+         }
       }
 
       if (j < num_levels - 1 && (grid_relax_type[1] == 18 || grid_relax_type[2] == 18))
@@ -3353,10 +4893,28 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          {
             hypre_ParCSRComputeL1Norms(A_array[j], 1, NULL, &l1_norm_data);
          }
+         /* L1 norm option 1: nnz abs-adds (negate for neg-def is no-op for SPD)
+          * Graph: nnz (abs per entry) + n (diag extraction for neg-def check) */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += l1_nnz + l1_n;
+         }
       }
       else if (j == num_levels - 1 && grid_relax_type[3] == 18)
       {
          hypre_ParCSRComputeL1Norms(A_array[j], 1, NULL, &l1_norm_data);
+         /* L1 norm option 1: nnz abs-adds (negate for neg-def is no-op for SPD)
+          * Graph: nnz (abs per entry) + n (diag extraction for neg-def check) */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += l1_nnz + l1_n;
+         }
       }
 
       if (l1_norm_data)
@@ -3387,6 +4945,15 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          hypre_GpuProfilingPushRange(nvtx_name);
 
          hypre_ParCSRComputeL1Norms(A_array[j], 1, NULL, &l1_norm_data);
+         /* L1 norm option 1: nnz abs-adds (negate for neg-def is no-op for SPD)
+          * Graph: nnz (abs per entry) + n (diag extraction for neg-def check) */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += l1_nnz + l1_n;
+         }
 
          l1_norms[j] = hypre_SeqVectorCreate(hypre_ParCSRMatrixNumRows(A_array[j]));
          hypre_VectorData(l1_norms[j]) = l1_norm_data;
@@ -3424,11 +4991,25 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          {
             hypre_ParCSRComputeL1Norms(A_array[j], 4, NULL, &l1_norm_data);
          }
+         /* L1 norm option 4: n mul (truncation only)
+          * Graph: n (diag search) + n (abs) + n (neg-def diag extraction) = 3n */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_n;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += 3.0 * l1_n;
+         }
       }
       else if ((grid_relax_type[3] == 8 || grid_relax_type[3] == 13 || grid_relax_type[3] == 14) &&
                j == num_levels - 1)
       {
          hypre_ParCSRComputeL1Norms(A_array[j], 4, NULL, &l1_norm_data);
+         /* L1 norm option 4: n mul (truncation only)
+          * Graph: n (diag search) + n (abs) + n (neg-def diag extraction) = 3n */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_n;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += 3.0 * l1_n;
+         }
       }
 
       if ((grid_relax_type[1] == 18 || grid_relax_type[2] == 18) && j < num_levels - 1)
@@ -3442,10 +5023,28 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          {
             hypre_ParCSRComputeL1Norms(A_array[j], 1, NULL, &l1_norm_data);
          }
+         /* L1 norm option 1: nnz abs-adds (negate for neg-def is no-op for SPD)
+          * Graph: nnz (abs per entry) + n (diag extraction for neg-def check) */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += l1_nnz + l1_n;
+         }
       }
       else if (grid_relax_type[3] == 18 && j == num_levels - 1)
       {
          hypre_ParCSRComputeL1Norms(A_array[j], 1, NULL, &l1_norm_data);
+         /* L1 norm option 1: nnz abs-adds (negate for neg-def is no-op for SPD)
+          * Graph: nnz (abs per entry) + n (diag extraction for neg-def check) */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            HYPRE_Real l1_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            hypre_ParAMGDataSetupFlops(amg_data) += l1_nnz;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += l1_nnz + l1_n;
+         }
       }
 
       if (l1_norm_data)
@@ -3483,6 +5082,11 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          HYPRE_Real *l1_norm_data = NULL;
 
          hypre_ParCSRComputeL1Norms(A_array[j], 5, NULL, &l1_norm_data);
+         /* L1 norm option 5: n diag lookup + n zero check = 2n (no neg-def check) */
+         {
+            HYPRE_Real l1_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            hypre_ParAMGDataSetupGraphOps(amg_data) += 2.0 * l1_n;
+         }
 
          l1_norms[j] = hypre_SeqVectorCreate(hypre_ParCSRMatrixNumRows(A_array[j]));
          hypre_VectorData(l1_norms[j]) = l1_norm_data;
@@ -3527,6 +5131,37 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                                        &coefs,
                                        &hypre_VectorData(cheby_ds[j]));
          cheby_coefs[j] = coefs;
+
+         /* Accumulate Chebyshev setup FLOPs and graph ops */
+         {
+            HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                             hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+            HYPRE_Real n_rows = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+            if (cheby_eig_est > 0)
+            {
+               /* CG-based eigenvalue estimation (scale=1):
+                  Pre-loop: 2n (diag extract: sqrt+div) + n (inner prod) = 3n numerical
+                  Per iter: nnz(A) (matvec) + 6n (2 innerprod + axpy + p-update + u-scale + s-scale)
+                  Graph: n (diag lookup) + n (abs in sqrt(abs(d))) = 2n */
+               hypre_ParAMGDataSetupFlops(amg_data) += 3.0 * n_rows
+                  + (HYPRE_Real) cheby_eig_est * (nnz_A + 6.0 * n_rows);
+               hypre_ParAMGDataSetupGraphOps(amg_data) += 2.0 * n_rows;
+            }
+            else
+            {
+               /* Gershgorin: (nnz-n) adds for off-diag, sub+add+2divs per row = nnz+3n numerical.
+                  Graph: (nnz-n) abs off-diag + n diag lookup + 2n global max/min = nnz + 2n */
+               hypre_ParAMGDataSetupFlops(amg_data) += nnz_A + 3.0 * n_rows;
+               hypre_ParAMGDataSetupGraphOps(amg_data) += nnz_A + 2.0 * n_rows;
+            }
+            /* Cheby_Setup scaling vector (scale=1): sqrt+div per row,
+               n diag lookup + n abs (graph) = 2n */
+            if (scale)
+            {
+               hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * n_rows;
+               hypre_ParAMGDataSetupGraphOps(amg_data) += 2.0 * n_rows;
+            }
+         }
       }
       else if (grid_relax_type[1] == 15 || (grid_relax_type[3] == 15 && j == (num_levels - 1))  )
       {
@@ -3549,6 +5184,14 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       if (relax_weight[j] == 0.0)
       {
          hypre_ParCSRMatrixScaledNorm(A_array[j], &relax_weight[j]);
+         /* Numerical: 2n (sqrt + div for dinvsqrt) + 3*nnz (2 muls + add per entry)
+          * Graph: n (diag lookup) + n (abs for dinvsqrt) + nnz (abs in sum) + n (max search) = nnz + 3n */
+         {
+            HYPRE_Real n_j = (HYPRE_Real) hypre_CSRMatrixNumRows(hypre_ParCSRMatrixDiag(A_array[j]));
+            HYPRE_Real nnz_j = (HYPRE_Real) hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j]));
+            hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * n_j + 3.0 * nnz_j;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += nnz_j + 3.0 * n_j;
+         }
          if (relax_weight[j] != 0.0)
          {
             relax_weight[j] = 4.0 / 3.0 / relax_weight[j];
@@ -3589,11 +5232,97 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                             (HYPRE_ParCSRMatrix) A_array[j],
                             (HYPRE_ParVector) f,
                             (HYPRE_ParVector) u);
+
+         /* Schwarz setup cost: domain construction (graph) + local factorizations (numerical).
+            Factorization: sum_i (1/6) d_i^3 FMAs (Cholesky, symmetric) or (1/3) d_i^3 FMAs (LU, nonsymmetric).
+            Graph: agglomeration ~4*nnz(A) + AE search sum(s_i^2)*nnz(A)/n,
+                   overlap ~4*nnz(A), extraction ~sum(d_i)*nnz(A)/n.
+            Uses d_i from domain structure; estimates s_i from d_i and average overlap. */
+         {
+            hypre_SchwarzData *sd = (hypre_SchwarzData *) smoother[j];
+            hypre_CSRMatrix *ds = hypre_SchwarzDataDomainStructure(sd);
+            if (ds)
+            {
+               HYPRE_Int *i_dd = hypre_CSRMatrixI(ds);
+               HYPRE_Int n_dom = hypre_CSRMatrixNumRows(ds);
+               HYPRE_Int schwarz_overlap = hypre_SchwarzDataOverlap(sd);
+               HYPRE_Int schwarz_domain_type = hypre_SchwarzDataDomainType(sd);
+               HYPRE_Int schwarz_nonsymm = hypre_SchwarzDataUseNonSymm(sd);
+               HYPRE_Real nnz_Aj = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+               HYPRE_Real n_j = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+               HYPRE_Real sum_di = 0.0, sum_di2 = 0.0, sum_di3 = 0.0;
+               HYPRE_Real fact_coeff = schwarz_nonsymm ? (1.0 / 3.0) : (1.0 / 6.0);
+               HYPRE_Int ii;
+
+               for (ii = 0; ii < n_dom; ii++)
+               {
+                  HYPRE_Real di = (HYPRE_Real)(i_dd[ii + 1] - i_dd[ii]);
+                  sum_di  += di;
+                  sum_di2 += di * di;
+                  sum_di3 += di * di * di;
+               }
+
+               /* Factorization cost */
+               {
+                  HYPRE_Real fact_cost = fact_coeff * sum_di3;
+                  hypre_ParAMGDataSetupFlops(amg_data) += fact_cost;
+                  hypre_SchwarzDataSetupFlops(sd) = fact_cost;
+               }
+
+               /* Graph cost */
+               {
+                  HYPRE_Real graph_cost = 0.0;
+                  /* Extraction: each domain scans A rows for its DOFs */
+                  graph_cost += sum_di * nnz_Aj / n_j;
+
+                  if (schwarz_domain_type == 2)
+                  {
+                     /* Agglomeration: 4*nnz(A) + AE search */
+                     graph_cost += 4.0 * nnz_Aj;
+                     /* AE search: sum s_i^2 * nnz(A)/n, estimate s_i from d_i */
+                     if (schwarz_overlap == 1 && n_dom > 0)
+                     {
+                        HYPRE_Real avg_ovlp = (sum_di - n_j) / (HYPRE_Real) n_dom;
+                        HYPRE_Real sum_si2 = sum_di2 - 2.0 * avg_ovlp * sum_di
+                                             + avg_ovlp * avg_ovlp * (HYPRE_Real) n_dom;
+                        graph_cost += sum_si2 * nnz_Aj / n_j;
+                     }
+                     else
+                     {
+                        /* No overlap: s_i = d_i */
+                        graph_cost += sum_di2 * nnz_Aj / n_j;
+                     }
+                  }
+
+                  if (schwarz_overlap == 1)
+                  {
+                     /* Overlap extension: 4*nnz(A) */
+                     graph_cost += 4.0 * nnz_Aj;
+                  }
+
+                  hypre_ParAMGDataSetupGraphOps(amg_data) += graph_cost;
+                  hypre_SchwarzDataSetupGraphOps(sd) = graph_cost;
+               }
+
+               /* Solve cost: forward+backward substitution on each domain = sum(d_i^2) FMAs */
+               hypre_ParAMGDataSmootherSolveFlops(amg_data)[j] = sum_di2;
+            }
+         }
+
          if (schwarz_relax_wt < 0 )
          {
             num_cg_sweeps = (HYPRE_Int) (-schwarz_relax_wt);
             hypre_BoomerAMGCGRelaxWt(amg_data, j, num_cg_sweeps,
                                      &schwarz_relax_wt);
+            /* CG relax weight: num_cg_sweeps iters of smoother+matvec+vector ops */
+            {
+               HYPRE_Real cg_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+               HYPRE_Real cg_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+               hypre_ParAMGDataSetupFlops(amg_data) +=
+                  (HYPRE_Real) num_cg_sweeps * (2.0 * cg_nnz + 6.0 * cg_n);
+            }
             /*hypre_printf (" schwarz weight %f \n", schwarz_relax_wt);*/
             HYPRE_SchwarzSetRelaxWeight(smoother[j], schwarz_relax_wt);
             if (hypre_ParAMGDataVariant(amg_data) > 0)
@@ -3668,6 +5397,18 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                          (HYPRE_ParVector) F_array[j],
                          (HYPRE_ParVector) U_array[j]);
 
+         /* Propagate FSAI setup FLOP and graph op counts to AMG */
+         {
+            hypre_ParFSAIData *fsai_d = (hypre_ParFSAIData *) smoother[j];
+            hypre_ParAMGDataSetupFlops(amg_data) += hypre_ParFSAIDataSetupFlops(fsai_d);
+            hypre_ParAMGDataSetupGraphOps(amg_data) += hypre_ParFSAIDataSetupGraphOps(fsai_d);
+
+            /* Store FSAI solve flops: 2 * nnz(G) for G*x and G^T*y */
+            hypre_ParCSRMatrix *Gmat = hypre_ParFSAIDataGmat(fsai_d);
+            hypre_ParAMGDataSmootherSolveFlops(amg_data)[j] =
+               2.0 * (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(Gmat);
+         }
+
 #if DEBUG_SAVE_ALL_OPS
          {
             char filename[256];
@@ -3708,6 +5449,22 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                         (HYPRE_ParCSRMatrix) A_array[j],
                         (HYPRE_ParVector) F_array[j],
                         (HYPRE_ParVector) U_array[j]);
+
+         /* Propagate ILU setup FLOP and graph op counts to AMG, and store solve flops */
+         {
+            hypre_ParILUData *ilu_data = (hypre_ParILUData *) smoother[j];
+            hypre_ParCSRMatrix *L = hypre_ParILUDataMatL(ilu_data);
+            hypre_ParCSRMatrix *U = hypre_ParILUDataMatU(ilu_data);
+            HYPRE_Real nnz_L = L ? (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(L) : 0.0;
+            HYPRE_Real nnz_U = U ? (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(U) : 0.0;
+
+            /* Propagate ILU setup work to AMG */
+            hypre_ParAMGDataSetupFlops(amg_data) += hypre_ParILUDataSetupFlops(ilu_data);
+            hypre_ParAMGDataSetupGraphOps(amg_data) += hypre_ParILUDataSetupGraphOps(ilu_data);
+
+            /* Store solve flops: nnz(L) + nnz(U) for triangular solves */
+            hypre_ParAMGDataSmootherSolveFlops(amg_data)[j] = nnz_L + nnz_U;
+         }
       }
       else if ((smooth_type == 8 || smooth_type == 18) && smooth_num_levels > j)
       {
@@ -3733,6 +5490,21 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                                     (HYPRE_ParCSRMatrix) A_array[j],
                                     (HYPRE_ParVector) F_array[j],
                                     (HYPRE_ParVector) U_array[j]);
+
+         /* Propagate ParaSails setup FLOP and graph op counts to AMG */
+         {
+            HYPRE_Real ps_flops = 0.0, ps_graph_ops = 0.0;
+            HYPRE_Int nnz_M = 0;
+            hypre_ParaSailsGetSetupFlops(smoother[j], &ps_flops);
+            hypre_ParaSailsGetSetupGraphOps(smoother[j], &ps_graph_ops);
+            hypre_ParAMGDataSetupFlops(amg_data) += ps_flops;
+            hypre_ParAMGDataSetupGraphOps(amg_data) += ps_graph_ops;
+
+            /* Store ParaSails solve flops: nnz(M) for nonsym, 2*nnz(M) for symmetric */
+            hypre_ParaSailsGetNnzM(smoother[j], &nnz_M);
+            hypre_ParAMGDataSmootherSolveFlops(amg_data)[j] =
+               (sym ? 2.0 : 1.0) * (HYPRE_Real) nnz_M;
+         }
       }
       else if ((smooth_type == 7 || smooth_type == 17) && smooth_num_levels > j)
       {
@@ -3767,11 +5539,27 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
          {
             num_cg_sweeps = (HYPRE_Int) (-relax_weight[j]);
             hypre_BoomerAMGCGRelaxWt(amg_data, j, num_cg_sweeps, &relax_weight[j]);
+            /* CG relax weight: num_cg_sweeps iters of smoother+matvec+vector ops */
+            {
+               HYPRE_Real cg_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+               HYPRE_Real cg_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+               hypre_ParAMGDataSetupFlops(amg_data) +=
+                  (HYPRE_Real) num_cg_sweeps * (2.0 * cg_nnz + 6.0 * cg_n);
+            }
          }
          if (omega[j] < 0)
          {
             num_cg_sweeps = (HYPRE_Int) (-omega[j]);
             hypre_BoomerAMGCGRelaxWt(amg_data, j, num_cg_sweeps, &omega[j]);
+            /* CG relax weight (omega): num_cg_sweeps iters of smoother+matvec+vector ops */
+            {
+               HYPRE_Real cg_nnz = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
+                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
+               HYPRE_Real cg_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
+               hypre_ParAMGDataSetupFlops(amg_data) +=
+                  (HYPRE_Real) num_cg_sweeps * (2.0 * cg_nnz + 6.0 * cg_n);
+            }
          }
       }
 
@@ -4025,6 +5813,43 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
    hypre_MemoryPrintUsage(comm, hypre_HandleLogLevel(hypre_handle()), "BoomerAMG setup end  ", 0);
    hypre_GpuProfilingPopRange();
    HYPRE_ANNOTATE_FUNC_END;
+
+   /*-----------------------------------------------------------------------
+    * Compute solve FLOPs per cycle by running a single cycle and reading
+    * the cycle_op_count accumulated by par_cycle.c / par_add_cycle.c.
+    * This ensures solve_flops exactly matches the real-time counting,
+    * avoiding formula maintenance for each smoother/cycle variant.
+    *
+    * Setup FLOPs are accumulated separately during the setup process above.
+    *-----------------------------------------------------------------------*/
+   {
+      HYPRE_Int num_levels = hypre_ParAMGDataNumLevels(amg_data);
+
+      /* Save and reset cycle op count */
+      HYPRE_Real saved_op_count = hypre_ParAMGDataCycleOpCount(amg_data);
+      hypre_ParAMGDataCycleOpCount(amg_data) = 0.0;
+
+      /* Set up random RHS and zero initial guess for the dummy cycle */
+      hypre_ParVectorSetRandomValues(F_array[0], 1);
+      hypre_ParVectorSetZeros(U_array[0]);
+
+      /* Dispatch to the correct cycle type (matches par_amg_solve.c logic) */
+      if ((additive      < 0 || additive      >= num_levels) &&
+          (mult_additive < 0 || mult_additive >= num_levels) &&
+          (simple        < 0 || simple        >= num_levels))
+      {
+         hypre_BoomerAMGCycle(amg_data, F_array, U_array);
+      }
+      else
+      {
+         hypre_ParVectorAllZeros(U_array[0]) = 0;
+         hypre_BoomerAMGAdditiveCycle(amg_data);
+      }
+
+      /* Store per-cycle cost and restore op count for real solves */
+      hypre_ParAMGDataSolveFlops(amg_data) = hypre_ParAMGDataCycleOpCount(amg_data);
+      hypre_ParAMGDataCycleOpCount(amg_data) = saved_op_count;
+   }
 
    return (hypre_error_flag);
 }

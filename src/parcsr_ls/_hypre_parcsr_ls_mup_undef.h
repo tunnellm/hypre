@@ -113,6 +113,8 @@
 #undef HYPRE_BoomerAMGGetCoarsenType
 #undef HYPRE_BoomerAMGGetConvergeType
 #undef HYPRE_BoomerAMGGetCumNnzAP
+#undef HYPRE_BoomerAMGGetSetupFlops
+#undef HYPRE_BoomerAMGGetSolveFlops
 #undef HYPRE_BoomerAMGGetCumNumIterations
 #undef HYPRE_BoomerAMGGetCycleNumSweeps
 #undef HYPRE_BoomerAMGGetCycleRelaxType
@@ -1048,6 +1050,8 @@
 #undef hypre_BoomerAMGGetCoarseningName
 #undef hypre_BoomerAMGGetConvergeType
 #undef hypre_BoomerAMGGetCumNnzAP
+#undef hypre_BoomerAMGGetSetupFlops
+#undef hypre_BoomerAMGGetSolveFlops
 #undef hypre_BoomerAMGGetCumNumIterations
 #undef hypre_BoomerAMGGetCycleName
 #undef hypre_BoomerAMGGetCycleNumSweeps

@@ -14,6 +14,16 @@
 
 #include "_hypre_parcsr_ls.h"
 
+/* Track PMIS iteration count for FLOP counting instrumentation.
+ * Set by hypre_BoomerAMGCoarsenPMISHost at completion. */
+static HYPRE_Int hypre_pmis_last_num_iters = 0;
+
+HYPRE_Int
+hypre_BoomerAMGCoarsenPMISNumIters( void )
+{
+   return hypre_pmis_last_num_iters;
+}
+
 /*==========================================================================*/
 /*==========================================================================*/
 /**
@@ -2808,6 +2818,9 @@ hypre_BoomerAMGCoarsenPMISHost( hypre_ParCSRMatrix    *S,
 #ifdef HYPRE_PROFILE
    hypre_profile_times[HYPRE_TIMER_ID_PMIS] += hypre_MPI_Wtime();
 #endif
+
+   /* Store iteration count for FLOP counting instrumentation */
+   hypre_pmis_last_num_iters = iter;
 
    return (ierr);
 }

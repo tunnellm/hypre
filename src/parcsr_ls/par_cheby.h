@@ -47,6 +47,9 @@ typedef struct hypre_ParChebyData_struct
    HYPRE_Int             owns_temp;
 
    /* Statistics variables */
+   HYPRE_Real            setup_flops;      /* FLOPs accumulated during setup */
+   HYPRE_Real            setup_graph_ops;  /* Graph ops accumulated during setup */
+   HYPRE_Real            apply_flops;      /* FLOPs per apply (computed in setup) */
 
 } hypre_ParChebyData;
 
@@ -79,5 +82,9 @@ typedef struct hypre_ParChebyData_struct
 #define hypre_ParChebyDataVtemp(data)          ((data) -> Vtemp)
 #define hypre_ParChebyDataZtemp(data)          ((data) -> Ztemp)
 #define hypre_ParChebyDataOwnsTemp(data)       ((data) -> owns_temp)
+
+#define hypre_ParChebyDataSetupFlops(data)     ((data) -> setup_flops)
+#define hypre_ParChebyDataSetupGraphOps(data)  ((data) -> setup_graph_ops)
+#define hypre_ParChebyDataApplyFlops(data)     ((data) -> apply_flops)
 
 #endif /* #ifndef hypre_ParCheby_DATA_HEADER */

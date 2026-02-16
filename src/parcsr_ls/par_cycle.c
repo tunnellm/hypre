@@ -89,6 +89,7 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
    /*   HYPRE_Int      *smooth_option; */
    HYPRE_Int       smooth_type;
    HYPRE_Int       smooth_num_levels;
+   HYPRE_Real     *smoother_solve_flops;
    HYPRE_Int       my_id;
    HYPRE_Int       restri_type;
    HYPRE_Real      alpha;
@@ -138,6 +139,7 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
    omega               = hypre_ParAMGDataOmega(amg_data);
    smooth_type         = hypre_ParAMGDataSmoothType(amg_data);
    smooth_num_levels   = hypre_ParAMGDataSmoothNumLevels(amg_data);
+   smoother_solve_flops = hypre_ParAMGDataSmootherSolveFlops(amg_data);
    l1_norms            = hypre_ParAMGDataL1Norms(amg_data);
    /* smooth_option       = hypre_ParAMGDataSmoothOption(amg_data); */
    /* RL */
@@ -310,6 +312,8 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
 
             hypre_ParCSRMatrixMatvecOutOfPlace(alpha, A_array[level],
                                                U_array[level], beta, F_array[level], Rtemp);
+            /* Count residual flops: nnz(A) */
+            cycle_op_count += num_coeffs[level];
 
             cg_num_sweep = hypre_ParAMGDataSmoothNumSweeps(amg_data);
             num_sweep = num_grid_sweeps[cycle_param];
@@ -408,9 +412,18 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                }
 
                /*-----------------------------------------------
-                * VERY sloppy approximation to cycle complexity
+                * Cycle complexity: use accurate smoother flops
+                * when available, otherwise approximate with nnz(A)
                 *-----------------------------------------------*/
-               if (old_version && level < num_levels - 1)
+               if (smooth_num_levels > level && smoother_solve_flops &&
+                   (smooth_type == 4 || smooth_type == 5 || smooth_type == 15 ||
+                    smooth_type == 6 || smooth_type == 16 ||
+                    smooth_type == 8 || smooth_type == 18))
+               {
+                  /* Use precomputed solve flops for FSAI (4), ILU (5, 15), Schwarz (6, 16), ParaSails (8, 18) */
+                  cycle_op_count += smoother_solve_flops[level];
+               }
+               else if (old_version && level < num_levels - 1)
                {
                   switch (relax_points)
                   {
@@ -422,6 +435,52 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                         cycle_op_count += (num_coeffs[level] - num_coeffs[level + 1]);
                         break;
                   }
+               }
+               else if (relax_type == 15)
+               {
+                  /* CG smoother: matvec (nnz) + 2 inner products (2n) + 2 axpys (2n)
+                   * = nnz + 4n FMAs per iteration */
+                  cycle_op_count += num_coeffs[level]
+                     + 4.0 * (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+               }
+               else if (relax_type == 16)
+               {
+                  /* Chebyshev: order iterations of matvec (nnz) + vector ops per iteration.
+                   * With scaling: 3n FMAs (scale, axpy, axpy). Without: n FMAs (axpy). */
+                  HYPRE_Int cheby_scale = hypre_ParAMGDataChebyScale(amg_data);
+                  HYPRE_Real n_global = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+                  cycle_op_count += cheby_order * (num_coeffs[level]
+                     + (cheby_scale ? 3.0 : 1.0) * n_global);
+               }
+               else if (relax_type == 6  || relax_type == 8  ||
+                        relax_type == 21 || relax_type == 88 ||
+                        relax_type == 89)
+               {
+                  /* Symmetric GS/SSOR: forward + backward sweep = 2 * nnz(A) FMAs */
+                  cycle_op_count += 2.0 * num_coeffs[level];
+               }
+               else if (relax_type == 17)
+               {
+                  /* FCF-Jacobi: F-relax + C-relax + F-relax. Each pass touches only
+                   * matching rows, so total = nnz(F_rows) + nnz(C_rows) + nnz(F_rows)
+                   * = nnz(A) + nnz(F_rows). Approximated as 1.5 * nnz(A) assuming
+                   * ~50% F-points (typical for standard RS/HMIS coarsening). */
+                  cycle_op_count += 1.5 * num_coeffs[level];
+               }
+               else if (relax_type == 30)
+               {
+                  /* Kaczmarz: forward + backward sweep, each sweep computes row
+                   * residual (nnz per row) then scatters update (nnz per row),
+                   * so 2 * nnz(A) per sweep, 4 * nnz(A) total. */
+                  cycle_op_count += 4.0 * num_coeffs[level];
+               }
+               else if (relax_type == 9  || relax_type == 19  ||
+                        relax_type == 98 || relax_type == 99  ||
+                        relax_type == 198 || relax_type == 199)
+               {
+                  /* Gaussian elimination: dense triangular solves cost n^2 FMAs */
+                  HYPRE_Real n_ge = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
+                  cycle_op_count += n_ge * n_ge;
                }
                else
                {
@@ -441,6 +500,9 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                   beta = 1.0;
                   hypre_ParCSRMatrixMatvecOutOfPlace(alpha, A_array[level],
                                                      U_array[level], beta, Aux_F, Vtemp);
+                  /* Count residual computation flops */
+                  cycle_op_count += num_coeffs[level];
+
                   if (smooth_type == 7 || smooth_type == 17)
                   {
                      HYPRE_ParCSRPilutSolve(smoother[level],
@@ -463,6 +525,8 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                                        (HYPRE_ParVector) Utemp);
                   }
                   hypre_ParVectorAxpy(relax_weight[level], Utemp, Aux_U);
+                  /* Axpy correction: n FMAs (scale + add per entry) */
+                  cycle_op_count += (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
                }
                else if ( smooth_num_levels > level && (smooth_type == 4) )
                {
@@ -635,6 +699,11 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                alfa = gamma / hypre_ParVectorInnerProd(Ptemp, Vtemp);
                hypre_ParVectorAxpy(alfa, Ptemp, U_array[level]);
                hypre_ParVectorAxpy(-alfa, Vtemp, Rtemp);
+
+               /* CG acceleration: matvec (nnz) + 2 inner products (2n) +
+                * direction update (n) + 2 axpys (2n) = nnz + 4n FMAs */
+               cycle_op_count += num_coeffs[level]
+                  + 4.0 * (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
             }
          } /* for (jj = 0; jj < cg_num_sweep; jj++) */
 
@@ -680,6 +749,8 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
             hypre_ParCSRMatrixMatvecOutOfPlace(alpha, A_array[fine_grid], U_array[fine_grid],
                                                beta, F_array[fine_grid], Vtemp);
          }
+         /* Count residual flops: nnz(A) */
+         cycle_op_count += num_coeffs[fine_grid];
          HYPRE_ANNOTATE_REGION_END("%s", "Residual");
          hypre_GpuProfilingPopRange();
 
@@ -706,6 +777,8 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                hypre_ParCSRMatrixMatvecT(alpha, R_array[fine_grid], Vtemp,
                                          beta, F_array[coarse_grid]);
             }
+            /* Count restriction flops: nnz(R) */
+            cycle_op_count += hypre_ParCSRMatrixDNumNonzeros(R_array[fine_grid]);
          }
          HYPRE_ANNOTATE_REGION_END("%s", "Restriction");
          HYPRE_ANNOTATE_MGLEVEL_END(level);
@@ -754,6 +827,8 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                                      U_array[coarse_grid],
                                      beta, U_array[fine_grid]);
             /* printf("Proc %d: level %d, n %d, Interpolation done\n", my_id, level, local_size); */
+            /* Count prolongation flops: nnz(P) */
+            cycle_op_count += hypre_ParCSRMatrixDNumNonzeros(P_array[fine_grid]);
          }
 
          hypre_ParVectorAllZeros(U_array[fine_grid]) = 0;

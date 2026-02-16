@@ -113,6 +113,8 @@ typedef struct
    HYPRE_Int          **dof_point_array;
    HYPRE_Int          **point_dof_map_array;
    HYPRE_Int            num_levels;
+   HYPRE_Int           *interp_num_passes;  /* per-level multipass count */
+   HYPRE_BigInt        *nnz_S_FF;           /* per-level nnz of S restricted to F-F */
    hypre_Vector       **l1_norms;
 
    /* Block data */
@@ -126,6 +128,7 @@ typedef struct
    HYPRE_Int            smooth_num_levels;
    HYPRE_Int            smooth_type;
    HYPRE_Solver        *smoother;
+   HYPRE_Real          *smoother_solve_flops;  /* per-level solve flops for smoothers */
    HYPRE_Int            smooth_num_sweeps;
    HYPRE_Int            schw_variant;
    HYPRE_Int            schw_overlap;
@@ -192,6 +195,9 @@ typedef struct
    hypre_Vector      *Vtemp_local;
    HYPRE_Real        *Vtemp_local_data;
    HYPRE_Real         cycle_op_count;
+   HYPRE_Real         setup_flops;      /* FLOPs accumulated during setup */
+   HYPRE_Real         setup_graph_ops;  /* Graph ops accumulated during setup */
+   HYPRE_Real         solve_flops;      /* FLOPs per solve cycle */
    hypre_ParVector   *Rtemp;
    hypre_ParVector   *Ptemp;
    hypre_ParVector   *Ztemp;
@@ -387,12 +393,15 @@ typedef struct
 #define hypre_ParAMGDataPointDofMapArray(amg_data) \
 ((amg_data)->point_dof_map_array)
 #define hypre_ParAMGDataNumLevels(amg_data) ((amg_data)->num_levels)
+#define hypre_ParAMGDataInterpNumPasses(amg_data) ((amg_data)->interp_num_passes)
+#define hypre_ParAMGDataNnzSFF(amg_data) ((amg_data)->nnz_S_FF)
 #define hypre_ParAMGDataSmoothType(amg_data) ((amg_data)->smooth_type)
 #define hypre_ParAMGDataSmoothNumLevels(amg_data) \
 ((amg_data)->smooth_num_levels)
 #define hypre_ParAMGDataSmoothNumSweeps(amg_data) \
 ((amg_data)->smooth_num_sweeps)
 #define hypre_ParAMGDataSmoother(amg_data) ((amg_data)->smoother)
+#define hypre_ParAMGDataSmootherSolveFlops(amg_data) ((amg_data)->smoother_solve_flops)
 #define hypre_ParAMGDataVariant(amg_data) ((amg_data)->schw_variant)
 #define hypre_ParAMGDataOverlap(amg_data) ((amg_data)->schw_overlap)
 #define hypre_ParAMGDataDomainType(amg_data) ((amg_data)->schw_domain_type)
@@ -458,6 +467,9 @@ typedef struct
 #define hypre_ParAMGDataVtempLocal(amg_data) ((amg_data)->Vtemp_local)
 #define hypre_ParAMGDataVtemplocalData(amg_data) ((amg_data)->Vtemp_local_data)
 #define hypre_ParAMGDataCycleOpCount(amg_data) ((amg_data)->cycle_op_count)
+#define hypre_ParAMGDataSetupFlops(amg_data) ((amg_data)->setup_flops)
+#define hypre_ParAMGDataSetupGraphOps(amg_data) ((amg_data)->setup_graph_ops)
+#define hypre_ParAMGDataSolveFlops(amg_data) ((amg_data)->solve_flops)
 #define hypre_ParAMGDataRtemp(amg_data) ((amg_data)->Rtemp)
 #define hypre_ParAMGDataPtemp(amg_data) ((amg_data)->Ptemp)
 #define hypre_ParAMGDataZtemp(amg_data) ((amg_data)->Ztemp)

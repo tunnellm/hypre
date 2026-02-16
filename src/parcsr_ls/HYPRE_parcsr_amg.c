@@ -2262,3 +2262,25 @@ HYPRE_BoomerAMGGetCumNnzAP( HYPRE_Solver  solver,
 {
    return ( hypre_BoomerAMGGetCumNnzAP( (void *) solver, cum_nnz_AP ) );
 }
+
+/*--------------------------------------------------------------------------
+ * HYPRE_BoomerAMGGetSetupFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_BoomerAMGGetSetupFlops( HYPRE_Solver  solver,
+                              HYPRE_Real   *setup_flops )
+{
+   return ( hypre_BoomerAMGGetSetupFlops( (void *) solver, setup_flops ) );
+}
+
+/*--------------------------------------------------------------------------
+ * HYPRE_BoomerAMGGetSolveFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_BoomerAMGGetSolveFlops( HYPRE_Solver  solver,
+                              HYPRE_Real   *solve_flops )
+{
+   return ( hypre_BoomerAMGGetSolveFlops( (void *) solver, solve_flops ) );
+}

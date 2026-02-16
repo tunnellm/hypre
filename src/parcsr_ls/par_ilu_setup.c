@@ -1177,6 +1177,30 @@ hypre_ILUSetup( void               *ilu_vdata,
                                                      hypre_ParCSRMatrixDNumNonzeros(matA);
    }
 
+   /* Compute FLOP and graph op counts for ILU setup
+    * Numerical factorization: For each L entry, one division to compute multiplier,
+    * then one mul-sub for each U entry in that row. Approximate as:
+    *   FLOPs = n (diagonal divisions) + 2 * nnz(L) (multiplier computation + elimination)
+    * Graph work (symbolic factorization):
+    *   ILU(0): nnz(A) index comparisons to determine L/U split
+    *   ILU(k): Additional fill-in tracking via level arrays and heap operations
+    *   Approximate as nnz(L) + nnz(U) for pattern construction
+    */
+   {
+      HYPRE_Real nnz_L = matL ? hypre_ParCSRMatrixDNumNonzeros(matL) : 0.0;
+      HYPRE_Real nnz_U = matU ? hypre_ParCSRMatrixDNumNonzeros(matU) : 0.0;
+      HYPRE_Real n_local = (HYPRE_Real) n;
+
+      /* Numerical FLOPs: n divisions + 2*nnz(L) for elimination */
+      hypre_ParILUDataSetupFlops(ilu_data) = n_local + 2.0 * nnz_L;
+
+      /* Graph ops: symbolic factorization pattern determination
+       * For ILU(0): nnz(A) comparisons for L/U split
+       * For ILU(k): level-based fill tracking adds nnz(L)*avg_U_row work
+       * Approximate conservatively as nnz(L) + nnz(U) */
+      hypre_ParILUDataSetupGraphOps(ilu_data) = nnz_L + nnz_U;
+   }
+
    /* TODO (VPM): Move ILU statistics printout to its own function */
    if ((my_id == 0) && (print_level > 0))
    {

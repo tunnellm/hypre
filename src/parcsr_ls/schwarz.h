@@ -28,7 +28,9 @@ typedef struct
    HYPRE_Int     *dof_func;
    HYPRE_Int     *pivots;
 
-
+   /* FLOP and graph op counting */
+   HYPRE_Real    setup_flops;      /* FLOPs accumulated during setup */
+   HYPRE_Real    setup_graph_ops;  /* Graph ops accumulated during setup */
 
 } hypre_SchwarzData;
 
@@ -52,6 +54,10 @@ typedef struct
 #define hypre_SchwarzDataScale(schwarz_data) ((schwarz_data)->scale)
 #define hypre_SchwarzDataDofFunc(schwarz_data) ((schwarz_data)->dof_func)
 #define hypre_SchwarzDataPivots(schwarz_data) ((schwarz_data)->pivots)
+
+/* FLOP and graph op counting */
+#define hypre_SchwarzDataSetupFlops(schwarz_data) ((schwarz_data)->setup_flops)
+#define hypre_SchwarzDataSetupGraphOps(schwarz_data) ((schwarz_data)->setup_graph_ops)
 
 #endif
 

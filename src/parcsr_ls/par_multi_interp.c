@@ -23,6 +23,7 @@ hypre_BoomerAMGBuildMultipassHost( hypre_ParCSRMatrix  *A,
                                    HYPRE_Real           trunc_factor,
                                    HYPRE_Int            P_max_elmts,
                                    HYPRE_Int            weight_option,
+                                   HYPRE_Int           *num_passes_ptr,
                                    hypre_ParCSRMatrix **P_ptr )
 {
    HYPRE_UNUSED_VAR(debug_flag);
@@ -2115,6 +2116,12 @@ hypre_BoomerAMGBuildMultipassHost( hypre_ParCSRMatrix  *A,
 
    *P_ptr = P;
 
+   /* Return num_passes if requested */
+   if (num_passes_ptr)
+   {
+      *num_passes_ptr = num_passes;
+   }
+
    /* wall_time = hypre_MPI_Wtime() - wall_time;
       hypre_printf("TOTAL TIME  %1.2e \n",wall_time); */
 
@@ -2144,6 +2151,7 @@ hypre_BoomerAMGBuildMultipass( hypre_ParCSRMatrix  *A,
                                HYPRE_Real           trunc_factor,
                                HYPRE_Int            P_max_elmts,
                                HYPRE_Int            weight_option,
+                               HYPRE_Int           *num_passes_ptr,
                                hypre_ParCSRMatrix **P_ptr )
 {
    hypre_GpuProfilingPushRange("MultipassInterp");
@@ -2160,6 +2168,8 @@ hypre_BoomerAMGBuildMultipass( hypre_ParCSRMatrix  *A,
                                                      trunc_factor, P_max_elmts, 9,
                                                      num_functions, dof_func,
                                                      P_ptr );
+      /* GPU version doesn't track passes; use default estimate */
+      if (num_passes_ptr) { *num_passes_ptr = 2; }
    }
    else
 #endif
@@ -2167,7 +2177,7 @@ hypre_BoomerAMGBuildMultipass( hypre_ParCSRMatrix  *A,
       ierr = hypre_BoomerAMGBuildMultipassHost( A, CF_marker, S, num_cpts_global,
                                                 num_functions, dof_func, debug_flag,
                                                 trunc_factor, P_max_elmts, weight_option,
-                                                P_ptr );
+                                                num_passes_ptr, P_ptr );
    }
 
    hypre_GpuProfilingPopRange();

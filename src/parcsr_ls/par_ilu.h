@@ -135,6 +135,10 @@ typedef struct hypre_ParILUData_struct
 
    /* local reordering */
    HYPRE_Int             reordering_type;
+
+   /* FLOP and graph op counting */
+   HYPRE_Real            setup_flops;      /* FLOPs accumulated during setup */
+   HYPRE_Real            setup_graph_ops;  /* Graph ops accumulated during setup */
 } hypre_ParILUData;
 
 #define hypre_ParILUDataTestOption(ilu_data)                   ((ilu_data) -> test_opt)
@@ -202,6 +206,10 @@ typedef struct hypre_ParILUData_struct
 #define hypre_ParILUDataRhs(ilu_data)                          ((ilu_data) -> rhs)
 #define hypre_ParILUDataX(ilu_data)                            ((ilu_data) -> x)
 #define hypre_ParILUDataReorderingType(ilu_data)               ((ilu_data) -> reordering_type)
+
+/* FLOP and graph op counting */
+#define hypre_ParILUDataSetupFlops(ilu_data)                   ((ilu_data) -> setup_flops)
+#define hypre_ParILUDataSetupGraphOps(ilu_data)                ((ilu_data) -> setup_graph_ops)
 
 /* Iterative ILU setup */
 #define hypre_ParILUDataIterativeSetupType(ilu_data)           ((ilu_data) -> iter_setup_type)

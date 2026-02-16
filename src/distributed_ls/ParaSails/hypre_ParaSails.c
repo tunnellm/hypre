@@ -397,3 +397,46 @@ hypre_ParaSailsBuildIJMatrix(hypre_ParaSails obj, HYPRE_IJMatrix *pij_A)
 
    return hypre_error_flag;
 }
+
+/*--------------------------------------------------------------------------
+ * hypre_ParaSailsGetSetupFlops - Get the FLOPs accumulated during setup.
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_ParaSailsGetSetupFlops(hypre_ParaSails obj, HYPRE_Real *setup_flops)
+{
+   hypre_ParaSails_struct *internal = (hypre_ParaSails_struct *) obj;
+
+   *setup_flops = ParaSailsGetSetupFlops(internal->ps);
+
+   return hypre_error_flag;
+}
+
+/*--------------------------------------------------------------------------
+ * hypre_ParaSailsGetSetupGraphOps - Get the graph ops accumulated during setup.
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_ParaSailsGetSetupGraphOps(hypre_ParaSails obj, HYPRE_Real *setup_graph_ops)
+{
+   hypre_ParaSails_struct *internal = (hypre_ParaSails_struct *) obj;
+
+   *setup_graph_ops = ParaSailsGetSetupGraphOps(internal->ps);
+
+   return hypre_error_flag;
+}
+
+/*--------------------------------------------------------------------------
+ * hypre_ParaSailsGetNnzM - Get the number of nonzeros in the M matrix.
+ * Used for computing solve FLOP cost (SpMV with M costs nnz(M) FMAs).
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_ParaSailsGetNnzM(hypre_ParaSails obj, HYPRE_Int *nnz_M)
+{
+   hypre_ParaSails_struct *internal = (hypre_ParaSails_struct *) obj;
+
+   *nnz_M = MatrixNnz(internal->ps->M);
+
+   return hypre_error_flag;
+}

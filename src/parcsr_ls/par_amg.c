@@ -299,6 +299,11 @@ hypre_BoomerAMGCreate( void )
    /* cycle_op_count = 0; */
    debug_flag = 0;
 
+   /* FLOP counting */
+   HYPRE_Real setup_flops = 0.0;
+   HYPRE_Real setup_graph_ops = 0.0;
+   HYPRE_Real solve_flops = 0.0;
+
    nongalerkin_tol = 0.0;
 
    rap2 = 0;
@@ -460,6 +465,9 @@ hypre_BoomerAMGCreate( void )
    hypre_BoomerAMGSetLogging(amg_data, logging);
    hypre_BoomerAMGSetPrintFileName(amg_data, log_file_name);
    hypre_BoomerAMGSetDebugFlag(amg_data, debug_flag);
+   hypre_ParAMGDataSetupFlops(amg_data) = setup_flops;
+   hypre_ParAMGDataSetupGraphOps(amg_data) = setup_graph_ops;
+   hypre_ParAMGDataSolveFlops(amg_data) = solve_flops;
    hypre_BoomerAMGSetRestriction(amg_data, 0);
    hypre_BoomerAMGSetIsTriangular(amg_data, 0);
    hypre_BoomerAMGSetGMRESSwitchR(amg_data, 64);
@@ -471,6 +479,8 @@ hypre_BoomerAMGCreate( void )
    hypre_ParAMGDataPArray(amg_data) = NULL;
    hypre_ParAMGDataRArray(amg_data) = NULL;
    hypre_ParAMGDataCFMarkerArray(amg_data) = NULL;
+   hypre_ParAMGDataInterpNumPasses(amg_data) = NULL;
+   hypre_ParAMGDataNnzSFF(amg_data) = NULL;
    hypre_ParAMGDataVtemp(amg_data)  = NULL;
    hypre_ParAMGDataRtemp(amg_data)  = NULL;
    hypre_ParAMGDataPtemp(amg_data)  = NULL;
@@ -483,6 +493,7 @@ hypre_BoomerAMGCreate( void )
    hypre_ParAMGDataDofPointArray(amg_data) = NULL;
    hypre_ParAMGDataPointDofMapArray(amg_data) = NULL;
    hypre_ParAMGDataSmoother(amg_data) = NULL;
+   hypre_ParAMGDataSmootherSolveFlops(amg_data) = NULL;
    hypre_ParAMGDataL1Norms(amg_data) = NULL;
 
    hypre_ParAMGDataABlockArray(amg_data) = NULL;
@@ -629,6 +640,11 @@ hypre_BoomerAMGDestroy( void *data )
                HYPRE_ParCSRPCGDestroy(smoother[num_levels - 1]);
             }
             hypre_TFree(smoother, HYPRE_MEMORY_HOST);
+         }
+         if (hypre_ParAMGDataSmootherSolveFlops(amg_data))
+         {
+            hypre_TFree(hypre_ParAMGDataSmootherSolveFlops(amg_data), HYPRE_MEMORY_HOST);
+            hypre_ParAMGDataSmootherSolveFlops(amg_data) = NULL;
          }
 
          hypre_TFree(hypre_ParAMGDataGridRelaxType(amg_data), HYPRE_MEMORY_HOST);
@@ -777,6 +793,8 @@ hypre_BoomerAMGDestroy( void *data )
       hypre_TFree(hypre_ParAMGDataPBlockArray(amg_data), HYPRE_MEMORY_HOST);
       hypre_TFree(hypre_ParAMGDataPArray(amg_data), HYPRE_MEMORY_HOST);
       hypre_TFree(hypre_ParAMGDataCFMarkerArray(amg_data), HYPRE_MEMORY_HOST);
+      hypre_TFree(hypre_ParAMGDataInterpNumPasses(amg_data), HYPRE_MEMORY_HOST);
+      hypre_TFree(hypre_ParAMGDataNnzSFF(amg_data), HYPRE_MEMORY_HOST);
       hypre_ParVectorDestroy(hypre_ParAMGDataRtemp(amg_data));
       hypre_ParVectorDestroy(hypre_ParAMGDataPtemp(amg_data));
       hypre_ParVectorDestroy(hypre_ParAMGDataZtemp(amg_data));
@@ -5240,6 +5258,69 @@ hypre_BoomerAMGGetCumNnzAP( void       *data,
       return hypre_error_flag;
    }
    *cum_nnz_AP = hypre_ParAMGDataCumNnzAP(amg_data);
+
+   return hypre_error_flag;
+}
+
+HYPRE_Int
+hypre_BoomerAMGGetSetupFlops( void       *data,
+                              HYPRE_Real *setup_flops )
+{
+   hypre_ParAMGData *amg_data = (hypre_ParAMGData*) data;
+
+   if (!amg_data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+   if (!setup_flops)
+   {
+      hypre_error_in_arg(2);
+      return hypre_error_flag;
+   }
+   *setup_flops = hypre_ParAMGDataSetupFlops(amg_data);
+
+   return hypre_error_flag;
+}
+
+HYPRE_Int
+hypre_BoomerAMGGetSetupGraphOps( void       *data,
+                                  HYPRE_Real *setup_graph_ops )
+{
+   hypre_ParAMGData *amg_data = (hypre_ParAMGData*) data;
+
+   if (!amg_data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+   if (!setup_graph_ops)
+   {
+      hypre_error_in_arg(2);
+      return hypre_error_flag;
+   }
+   *setup_graph_ops = hypre_ParAMGDataSetupGraphOps(amg_data);
+
+   return hypre_error_flag;
+}
+
+HYPRE_Int
+hypre_BoomerAMGGetSolveFlops( void       *data,
+                              HYPRE_Real *solve_flops )
+{
+   hypre_ParAMGData *amg_data = (hypre_ParAMGData*) data;
+
+   if (!amg_data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+   if (!solve_flops)
+   {
+      hypre_error_in_arg(2);
+      return hypre_error_flag;
+   }
+   *solve_flops = hypre_ParAMGDataSolveFlops(amg_data);
 
    return hypre_error_flag;
 }

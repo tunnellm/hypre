@@ -60,6 +60,7 @@ hypre_BoomerAMGAdditiveCycle( void              *amg_vdata)
    HYPRE_Int      *num_grid_sweeps;
    hypre_Vector  **l1_norms;
    HYPRE_Real      alpha, beta;
+   HYPRE_Real      cycle_op_count;
    HYPRE_Real     *u_data;
    HYPRE_Real     *v_data;
    hypre_Vector   *l1_norms_lvl;
@@ -104,6 +105,8 @@ hypre_BoomerAMGAdditiveCycle( void              *amg_vdata)
    num_grid_sweeps   = hypre_ParAMGDataNumGridSweeps(amg_data);
 
    /* Initialize */
+
+   cycle_op_count = hypre_ParAMGDataCycleOpCount(amg_data);
 
    addlvl = hypre_max(additive, mult_additive);
    addlvl = hypre_max(addlvl, simple);
@@ -208,6 +211,67 @@ hypre_BoomerAMGAdditiveCycle( void              *amg_vdata)
                                    beta, F_array[coarse_grid]);
       }
 
+      /* Cycle complexity counting for this level */
+      {
+         HYPRE_Real nnz_A = hypre_ParCSRMatrixDNumNonzeros(A_array[fine_grid]);
+         HYPRE_Real nnz_R = hypre_ParCSRMatrixDNumNonzeros(R_array[fine_grid]);
+         HYPRE_Real n_fine = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[fine_grid]);
+
+         if (level < addlvl || level > add_end) /* multiplicative */
+         {
+            /* Pre-smooth: per-sweep cost depends on smoother type */
+            HYPRE_Real down_cost;
+            if (rlx_down == 0 || rlx_down == 18)
+            {
+               down_cost = n_fine;
+            }
+            else if (rlx_down == 6  || rlx_down == 8  || rlx_down == 21 ||
+                     rlx_down == 88 || rlx_down == 89)
+            {
+               down_cost = 2.0 * nnz_A;
+            }
+            else if (rlx_down == 17)
+            {
+               down_cost = 1.5 * nnz_A;
+            }
+            else if (rlx_down == 30)
+            {
+               down_cost = 4.0 * nnz_A;
+            }
+            else if (rlx_down == 15)
+            {
+               down_cost = nnz_A + 4.0 * n_fine;
+            }
+            else if (rlx_down == 16)
+            {
+               HYPRE_Int cheby_order = hypre_ParAMGDataChebyOrder(amg_data);
+               HYPRE_Int cheby_scale = hypre_ParAMGDataChebyScale(amg_data);
+               down_cost = (HYPRE_Real) cheby_order *
+                  (nnz_A + (cheby_scale ? 3.0 : 1.0) * n_fine);
+            }
+            else if (rlx_down == 9  || rlx_down == 19  || rlx_down == 98 ||
+                     rlx_down == 99 || rlx_down == 198 || rlx_down == 199)
+            {
+               down_cost = n_fine * n_fine;
+            }
+            else
+            {
+               down_cost = nnz_A;
+            }
+            cycle_op_count += (HYPRE_Real) num_grid_sweeps[1] * down_cost;
+
+            /* Residual: nnz(A) */
+            cycle_op_count += nnz_A;
+            /* Restrict: nnz(R) */
+            cycle_op_count += nnz_R;
+         }
+         else /* additive */
+         {
+            /* Restrict only: nnz(R) */
+            cycle_op_count += nnz_R;
+         }
+      }
+
       HYPRE_ANNOTATE_MGLEVEL_END(level);
    }
 
@@ -246,6 +310,30 @@ hypre_BoomerAMGAdditiveCycle( void              *amg_vdata)
          hypre_ParCSRMatrixMatvec(1.0, Lambda, Rtilde, 1.0, Xtilde);
       }
       if (addlvl == 0) { hypre_ParVectorCopy(Xtilde, U_array[0]); }
+
+      /* Additive solve counting */
+      if (simple > -1)
+      {
+         /* x += D_inv * r: n FMAs */
+         cycle_op_count += (HYPRE_Real) n_global;
+      }
+      else
+      {
+         HYPRE_Real nnz_Lambda = hypre_ParCSRMatrixDNumNonzeros(Lambda);
+         if (num_grid_sweeps[1] > 1)
+         {
+            /* Lambda*R + scale(n) + Atilde*tmp + Lambda*R */
+            HYPRE_Real nnz_Atilde = hypre_ParCSRMatrixDNumNonzeros(Atilde);
+            HYPRE_Real n_rtilde = (HYPRE_Real) hypre_VectorSize(
+               hypre_ParVectorLocalVector(Rtilde));
+            cycle_op_count += 2.0 * nnz_Lambda + nnz_Atilde + n_rtilde;
+         }
+         else
+         {
+            /* Lambda*Rtilde only */
+            cycle_op_count += nnz_Lambda;
+         }
+      }
    }
    if (add_end < num_levels - 1)
    {
@@ -263,6 +351,55 @@ hypre_BoomerAMGAdditiveCycle( void              *amg_vdata)
                                    relax_weight[fine_grid], omega[fine_grid],
                                    l1_norms[fine_grid] ? hypre_VectorData(l1_norms[fine_grid]) : NULL,
                                    U_array[fine_grid], Vtemp, Ztemp);
+      /* Coarse grid solve counting */
+      {
+         HYPRE_Real n_coarse = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(
+            A_array[num_levels - 1]);
+         HYPRE_Real nnz_A_coarse = hypre_ParCSRMatrixDNumNonzeros(A_array[num_levels - 1]);
+         HYPRE_Real coarse_cost;
+         if (rlx_coarse == 0 || rlx_coarse == 18)
+         {
+            coarse_cost = n_coarse;
+         }
+         else if (rlx_coarse == 6  || rlx_coarse == 8  || rlx_coarse == 21 ||
+                  rlx_coarse == 88 || rlx_coarse == 89)
+         {
+            coarse_cost = 2.0 * nnz_A_coarse;
+         }
+         else if (rlx_coarse == 9  || rlx_coarse == 19  || rlx_coarse == 98 ||
+                  rlx_coarse == 99 || rlx_coarse == 198 || rlx_coarse == 199)
+         {
+            coarse_cost = n_coarse * n_coarse;
+         }
+         else if (rlx_coarse == 15)
+         {
+            /* CG smoother: matvec (nnz) + 2 inner products (2n) + 2 axpys (2n)
+             * = nnz + 4n FMAs per iteration */
+            coarse_cost = nnz_A_coarse + 4.0 * n_coarse;
+         }
+         else if (rlx_coarse == 16)
+         {
+            HYPRE_Int cheby_order = hypre_ParAMGDataChebyOrder(amg_data);
+            HYPRE_Int cheby_scale = hypre_ParAMGDataChebyScale(amg_data);
+            coarse_cost = (HYPRE_Real) cheby_order *
+               (nnz_A_coarse + (cheby_scale ? 3.0 : 1.0) * n_coarse);
+         }
+         else if (rlx_coarse == 17)
+         {
+            /* FCF-Jacobi: F+C+F sweeps = 1.5 * nnz(A) */
+            coarse_cost = 1.5 * nnz_A_coarse;
+         }
+         else if (rlx_coarse == 30)
+         {
+            /* Kaczmarz: forward + backward sweep = 4 * nnz(A) */
+            coarse_cost = 4.0 * nnz_A_coarse;
+         }
+         else
+         {
+            coarse_cost = nnz_A_coarse;
+         }
+         cycle_op_count += (HYPRE_Real) num_grid_sweeps[3] * coarse_cost;
+      }
    }
    HYPRE_ANNOTATE_MGLEVEL_END(num_levels - 1);
 
@@ -333,8 +470,64 @@ hypre_BoomerAMGAdditiveCycle( void              *amg_vdata)
                                   beta, U_array[fine_grid]);
       }
 
+      /* Up cycle complexity counting */
+      {
+         HYPRE_Real nnz_P = hypre_ParCSRMatrixDNumNonzeros(P_array[fine_grid]);
+         /* Interpolate: nnz(P) */
+         cycle_op_count += nnz_P;
+
+         if (level <= addlvl || level > add_end + 1) /* multiplicative */
+         {
+            /* Post-smooth: per-sweep cost depends on smoother type */
+            HYPRE_Real nnz_A = hypre_ParCSRMatrixDNumNonzeros(A_array[fine_grid]);
+            HYPRE_Real n_fine = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[fine_grid]);
+            HYPRE_Real up_cost;
+            if (rlx_up == 0 || rlx_up == 18)
+            {
+               up_cost = n_fine;
+            }
+            else if (rlx_up == 6  || rlx_up == 8  || rlx_up == 21 ||
+                     rlx_up == 88 || rlx_up == 89)
+            {
+               up_cost = 2.0 * nnz_A;
+            }
+            else if (rlx_up == 17)
+            {
+               up_cost = 1.5 * nnz_A;
+            }
+            else if (rlx_up == 30)
+            {
+               up_cost = 4.0 * nnz_A;
+            }
+            else if (rlx_up == 15)
+            {
+               up_cost = nnz_A + 4.0 * n_fine;
+            }
+            else if (rlx_up == 16)
+            {
+               HYPRE_Int cheby_order = hypre_ParAMGDataChebyOrder(amg_data);
+               HYPRE_Int cheby_scale = hypre_ParAMGDataChebyScale(amg_data);
+               up_cost = (HYPRE_Real) cheby_order *
+                  (nnz_A + (cheby_scale ? 3.0 : 1.0) * n_fine);
+            }
+            else if (rlx_up == 9  || rlx_up == 19  || rlx_up == 98 ||
+                     rlx_up == 99 || rlx_up == 198 || rlx_up == 199)
+            {
+               up_cost = n_fine * n_fine;
+            }
+            else
+            {
+               up_cost = nnz_A;
+            }
+            cycle_op_count += (HYPRE_Real) num_grid_sweeps[2] * up_cost;
+         }
+      }
+
       HYPRE_ANNOTATE_MGLEVEL_END(level);
    }
+
+   /* Store cycle op count */
+   hypre_ParAMGDataCycleOpCount(amg_data) = cycle_op_count;
 
    HYPRE_ANNOTATE_FUNC_END;
 
@@ -1015,6 +1208,28 @@ HYPRE_Int hypre_CreateLambda(void *amg_vdata)
    hypre_TFree(buf_data, HYPRE_MEMORY_HOST);
    hypre_TFree(level_start, HYPRE_MEMORY_HOST);
 
+   /* FLOP and graph op counting for Lambda construction:
+    * Numerical: n (D_data divisions) + 3n (Lambda diagonal) + 2*(nnz-n) (Lambda off-diagonal)
+    *          = 2n + 2*nnz
+    * Graph: n (row pointers) + n (Lambda diag col index) + (nnz-n) (Lambda off-diag col index)
+    *      = n + nnz
+    * If ns > 1, Atilde adds another n + nnz graph ops (same structure as Lambda).
+    * Note: CSR row pointer construction counted as graph work (PyAMG will need matching instrumentation).
+    */
+   {
+      HYPRE_Real n_total = (HYPRE_Real) num_rows_L;
+      HYPRE_Real nnz_total = (HYPRE_Real) num_nonzeros_diag;
+      hypre_ParAMGDataSetupFlops(amg_data) += 2.0 * n_total + 2.0 * nnz_total;
+      if (ns > 1)
+      {
+         hypre_ParAMGDataSetupGraphOps(amg_data) += 2.0 * (n_total + nnz_total);
+      }
+      else
+      {
+         hypre_ParAMGDataSetupGraphOps(amg_data) += n_total + nnz_total;
+      }
+   }
+
    return Solve_err_flag;
 }
 
@@ -1155,6 +1370,11 @@ HYPRE_Int hypre_CreateDinv(void *amg_vdata)
    hypre_ParAMGDataDinv(amg_data) = D_inv;
    hypre_ParAMGDataRtilde(amg_data) = Rtilde;
    hypre_ParAMGDataXtilde(amg_data) = Xtilde;
+
+   /* FLOP count: 1 division per row across all additive levels.
+    * Graph: n diagonal extractions (Hypre stores diagonal first). */
+   hypre_ParAMGDataSetupFlops(amg_data) += (HYPRE_Real) num_rows_L;
+   hypre_ParAMGDataSetupGraphOps(amg_data) += (HYPRE_Real) num_rows_L;
 
    return Solve_err_flag;
 }

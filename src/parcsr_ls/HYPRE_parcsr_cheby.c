@@ -275,3 +275,33 @@ HYPRE_ParChebyGetMinMaxEigEst( HYPRE_Solver  solver,
 {
    return ( hypre_ParChebyGetMinMaxEigEst( (hypre_ParChebyData *) solver, eig_min_est, eig_max_est ) );
 }
+
+/*--------------------------------------------------------------------------
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_ParChebyGetSetupFlops( HYPRE_Solver  solver,
+                             HYPRE_Real   *setup_flops )
+{
+   return ( hypre_ParChebyGetSetupFlops( (hypre_ParChebyData *) solver, setup_flops ) );
+}
+
+/*--------------------------------------------------------------------------
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_ParChebyGetSetupGraphOps( HYPRE_Solver  solver,
+                                HYPRE_Real   *setup_graph_ops )
+{
+   return ( hypre_ParChebyGetSetupGraphOps( (hypre_ParChebyData *) solver, setup_graph_ops ) );
+}
+
+/*--------------------------------------------------------------------------
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_ParChebyGetApplyFlops( HYPRE_Solver  solver,
+                             HYPRE_Real   *apply_flops )
+{
+   return ( hypre_ParChebyGetApplyFlops( (hypre_ParChebyData *) solver, apply_flops ) );
+}

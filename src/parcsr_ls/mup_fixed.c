@@ -1921,17 +1921,17 @@ hypre_BoomerAMGBuildModPartialExtPEInterpHost( hypre_ParCSRMatrix *A, HYPRE_Int 
 /*--------------------------------------------------------------------------*/
 
 HYPRE_Int
-hypre_BoomerAMGBuildMultipass( hypre_ParCSRMatrix *A, HYPRE_Int *CF_marker, hypre_ParCSRMatrix *S, HYPRE_BigInt *num_cpts_global, HYPRE_Int num_functions, HYPRE_Int *dof_func, HYPRE_Int debug_flag, HYPRE_Real trunc_factor, HYPRE_Int P_max_elmts, HYPRE_Int weight_option, hypre_ParCSRMatrix **P_ptr )
+hypre_BoomerAMGBuildMultipass( hypre_ParCSRMatrix *A, HYPRE_Int *CF_marker, hypre_ParCSRMatrix *S, HYPRE_BigInt *num_cpts_global, HYPRE_Int num_functions, HYPRE_Int *dof_func, HYPRE_Int debug_flag, HYPRE_Real trunc_factor, HYPRE_Int P_max_elmts, HYPRE_Int weight_option, HYPRE_Int *num_passes_ptr, hypre_ParCSRMatrix **P_ptr )
 {
-   return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGBuildMultipass)( A, CF_marker, S, num_cpts_global, num_functions, dof_func, debug_flag, trunc_factor, P_max_elmts, weight_option, P_ptr );
+   return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGBuildMultipass)( A, CF_marker, S, num_cpts_global, num_functions, dof_func, debug_flag, trunc_factor, P_max_elmts, weight_option, num_passes_ptr, P_ptr );
 }
 
 /*--------------------------------------------------------------------------*/
 
 HYPRE_Int
-hypre_BoomerAMGBuildMultipassHost( hypre_ParCSRMatrix *A, HYPRE_Int *CF_marker, hypre_ParCSRMatrix *S, HYPRE_BigInt *num_cpts_global, HYPRE_Int num_functions, HYPRE_Int *dof_func, HYPRE_Int debug_flag, HYPRE_Real trunc_factor, HYPRE_Int P_max_elmts, HYPRE_Int weight_option, hypre_ParCSRMatrix **P_ptr )
+hypre_BoomerAMGBuildMultipassHost( hypre_ParCSRMatrix *A, HYPRE_Int *CF_marker, hypre_ParCSRMatrix *S, HYPRE_BigInt *num_cpts_global, HYPRE_Int num_functions, HYPRE_Int *dof_func, HYPRE_Int debug_flag, HYPRE_Real trunc_factor, HYPRE_Int P_max_elmts, HYPRE_Int weight_option, HYPRE_Int *num_passes_ptr, hypre_ParCSRMatrix **P_ptr )
 {
-   return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGBuildMultipassHost)( A, CF_marker, S, num_cpts_global, num_functions, dof_func, debug_flag, trunc_factor, P_max_elmts, weight_option, P_ptr );
+   return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGBuildMultipassHost)( A, CF_marker, S, num_cpts_global, num_functions, dof_func, debug_flag, trunc_factor, P_max_elmts, weight_option, num_passes_ptr, P_ptr );
 }
 
 /*--------------------------------------------------------------------------*/
@@ -2692,6 +2692,22 @@ HYPRE_Int
 hypre_BoomerAMGGetCumNnzAP( void *data, HYPRE_Real *cum_nnz_AP )
 {
    return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGGetCumNnzAP)( data, cum_nnz_AP );
+}
+
+/*--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_BoomerAMGGetSetupFlops( void *data, HYPRE_Real *setup_flops )
+{
+   return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGGetSetupFlops)( data, setup_flops );
+}
+
+/*--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_BoomerAMGGetSolveFlops( void *data, HYPRE_Real *solve_flops )
+{
+   return HYPRE_CURRENTPRECISION_FUNC(hypre_BoomerAMGGetSolveFlops)( data, solve_flops );
 }
 
 /*--------------------------------------------------------------------------*/

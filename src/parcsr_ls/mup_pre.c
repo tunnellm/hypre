@@ -1618,6 +1618,42 @@ HYPRE_BoomerAMGGetCumNnzAP_pre( HYPRE_Precision precision, HYPRE_Solver solver, 
 /*--------------------------------------------------------------------------*/
 
 HYPRE_Int
+HYPRE_BoomerAMGGetSetupFlops_pre( HYPRE_Precision precision, HYPRE_Solver solver, void *setup_flops )
+{
+   switch (precision)
+   {
+      case HYPRE_REAL_SINGLE:
+         return HYPRE_BoomerAMGGetSetupFlops_flt( solver, (hypre_float *)setup_flops );
+      case HYPRE_REAL_DOUBLE:
+         return HYPRE_BoomerAMGGetSetupFlops_dbl( solver, (hypre_double *)setup_flops );
+      case HYPRE_REAL_LONGDOUBLE:
+         return HYPRE_BoomerAMGGetSetupFlops_long_dbl( solver, (hypre_long_double *)setup_flops );
+      default:
+         { HYPRE_Int value = 0; hypre_error_w_msg(HYPRE_ERROR_GENERIC, "Unknown solver precision"); return value; }
+   }
+}
+
+/*--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_BoomerAMGGetSolveFlops_pre( HYPRE_Precision precision, HYPRE_Solver solver, void *solve_flops )
+{
+   switch (precision)
+   {
+      case HYPRE_REAL_SINGLE:
+         return HYPRE_BoomerAMGGetSolveFlops_flt( solver, (hypre_float *)solve_flops );
+      case HYPRE_REAL_DOUBLE:
+         return HYPRE_BoomerAMGGetSolveFlops_dbl( solver, (hypre_double *)solve_flops );
+      case HYPRE_REAL_LONGDOUBLE:
+         return HYPRE_BoomerAMGGetSolveFlops_long_dbl( solver, (hypre_long_double *)solve_flops );
+      default:
+         { HYPRE_Int value = 0; hypre_error_w_msg(HYPRE_ERROR_GENERIC, "Unknown solver precision"); return value; }
+   }
+}
+
+/*--------------------------------------------------------------------------*/
+
+HYPRE_Int
 HYPRE_BoomerAMGGetCumNumIterations_pre( HYPRE_Precision precision, HYPRE_Solver solver, HYPRE_Int *cum_num_iterations )
 {
    switch (precision)

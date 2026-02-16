@@ -159,6 +159,36 @@ HYPRE_Int HYPRE_BoomerAMGSetCumNnzAP(HYPRE_Solver  solver,
                                      HYPRE_Real    cum_nnz_AP);
 
 /**
+ * Returns the estimated number of FLOPs for the setup phase.
+ * FLOPs are accumulated during setup based on PyAMG complexity analysis.
+ * Only valid after successful completion of HYPRE_BoomerAMGSetup.
+ *
+ * Per-level setup cost formula:
+ *   - SOC (strength of connection): 2 * nnz(A)
+ *   - Coarsening: ~0 (graph operations only)
+ *   - Interpolation construction: 2 * nnz(A)
+ *   - RAP (Galerkin product): 2 * nnz(A) * nnz(P) / n
+ *
+ * Counting convention: FMA assumed (multiply-add as single FLOP),
+ * sparse matvec counted as nnz operations.
+ **/
+HYPRE_Int HYPRE_BoomerAMGGetSetupFlops(HYPRE_Solver  solver,
+                                       HYPRE_Real   *setup_flops);
+
+/**
+ * Returns the estimated number of FLOPs per solve cycle.
+ * Accounts for cycle type: V-cycle (1 visit/level), W-cycle (2^lev visits),
+ * and F-cycle ((num_levels - lev) visits).
+ * Only valid after successful completion of HYPRE_BoomerAMGSetup.
+ * Counting convention: FMA assumed (multiply-add as single FLOP),
+ * sparse matvec counted as nnz operations.
+ * Symmetric smoothers (relax types 6, 8, 21, 88, 89) are counted as
+ * 2x per sweep since they perform forward + backward passes.
+ **/
+HYPRE_Int HYPRE_BoomerAMGGetSolveFlops(HYPRE_Solver  solver,
+                                       HYPRE_Real   *solve_flops);
+
+/**
  * Returns the norm of the final relative residual.
  **/
 HYPRE_Int HYPRE_BoomerAMGGetFinalRelativeResidualNorm(HYPRE_Solver  solver,
@@ -1959,6 +1989,15 @@ HYPRE_Int HYPRE_FSAISetPrintLevel(HYPRE_Solver solver,
 HYPRE_Int HYPRE_FSAISetZeroGuess(HYPRE_Solver solver,
                                  HYPRE_Int    zero_guess);
 
+/**
+ * (Optional) Get the number of FLOPs accumulated during setup.
+ *
+ * Counts multiplications and divisions assuming fused multiply-add (FMA).
+ * Includes dense Cholesky solves and gradient computations.
+ **/
+HYPRE_Int HYPRE_FSAIGetSetupFlops(HYPRE_Solver solver,
+                                  HYPRE_Real  *setup_flops);
+
 /**@}*/
 
 /*--------------------------------------------------------------------------
@@ -2104,6 +2143,33 @@ HYPRE_Int HYPRE_ParChebyGetMinMaxEigEst( HYPRE_Solver solver,
  **/
 HYPRE_Int HYPRE_ParChebySetZeroGuess(HYPRE_Solver solver,
                                      HYPRE_Int    zero_guess);
+
+/**
+ * (Optional) Get the number of FLOPs accumulated during setup.
+ *
+ * Counts multiplications assuming fused multiply-add (FMA).
+ * For eig_est > 0: eig_est iterations of CG for eigenvalue estimation.
+ * For eig_est = 0: Gershgorin bounds (single matrix scan).
+ **/
+HYPRE_Int HYPRE_ParChebyGetSetupFlops(HYPRE_Solver solver,
+                                      HYPRE_Real  *setup_flops);
+
+/**
+ * (Optional) Get the number of graph operations during setup.
+ *
+ * Counts index traversals, abs operations, and diagonal searches
+ * during eigenvalue estimation and scaling vector construction.
+ **/
+HYPRE_Int HYPRE_ParChebyGetSetupGraphOps(HYPRE_Solver solver,
+                                          HYPRE_Real  *setup_graph_ops);
+
+/**
+ * (Optional) Get the number of FLOPs per apply.
+ *
+ * Computed during setup based on polynomial order, scaling, and matrix size.
+ **/
+HYPRE_Int HYPRE_ParChebyGetApplyFlops(HYPRE_Solver solver,
+                                      HYPRE_Real  *apply_flops);
 
 /**@}*/
 
@@ -2262,6 +2328,16 @@ HYPRE_Int HYPRE_ParaSailsSetLogging(HYPRE_Solver solver,
  **/
 HYPRE_Int HYPRE_ParaSailsBuildIJMatrix(HYPRE_Solver    solver,
                                        HYPRE_IJMatrix *pij_A);
+
+/**
+ * (Optional) Get the number of FLOPs accumulated during ParaSails setup.
+ * Only valid for symmetric mode (returns 0 for nonsymmetric).
+ *
+ * @param solver [IN] Preconditioner object.
+ * @param setup_flops [OUT] Pointer to store the FLOP count.
+ **/
+HYPRE_Int HYPRE_ParaSailsGetSetupFlops(HYPRE_Solver  solver,
+                                       HYPRE_Real   *setup_flops);
 
 /* ParCSRParaSails routines */
 
