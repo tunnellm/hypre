@@ -2284,3 +2284,29 @@ HYPRE_BoomerAMGGetSolveFlops( HYPRE_Solver  solver,
 {
    return ( hypre_BoomerAMGGetSolveFlops( (void *) solver, solve_flops ) );
 }
+
+/*--------------------------------------------------------------------------
+ * HYPRE_BoomerAMGGetSetupGraphOps
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_BoomerAMGGetSetupGraphOps( HYPRE_Solver  solver,
+                                  HYPRE_Real   *setup_graph_ops )
+{
+   return ( hypre_BoomerAMGGetSetupGraphOps( (void *) solver, setup_graph_ops ) );
+}
+
+/*--------------------------------------------------------------------------
+ * HYPRE_BoomerAMGGetApplyFlops
+ *
+ * Returns the per-cycle solve FLOPs, measured by running a dummy cycle
+ * during setup. This is the precomputed cost of one V/W/F-cycle, not the
+ * live accumulator (cycle_op_count) which resets on each solve call.
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_BoomerAMGGetApplyFlops( HYPRE_Solver  solver,
+                               HYPRE_Real   *apply_flops )
+{
+   return ( hypre_BoomerAMGGetSolveFlops( (void *) solver, apply_flops ) );
+}

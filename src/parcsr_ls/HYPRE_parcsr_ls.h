@@ -189,6 +189,19 @@ HYPRE_Int HYPRE_BoomerAMGGetSolveFlops(HYPRE_Solver  solver,
                                        HYPRE_Real   *solve_flops);
 
 /**
+ * (Optional) Get the number of graph operations accumulated during setup.
+ **/
+HYPRE_Int HYPRE_BoomerAMGGetSetupGraphOps(HYPRE_Solver  solver,
+                                           HYPRE_Real   *setup_graph_ops);
+
+/**
+ * (Optional) Get the per-cycle apply FLOPs, measured by running a dummy
+ * cycle during setup. Equivalent to HYPRE_BoomerAMGGetSolveFlops.
+ **/
+HYPRE_Int HYPRE_BoomerAMGGetApplyFlops(HYPRE_Solver  solver,
+                                        HYPRE_Real   *apply_flops);
+
+/**
  * Returns the norm of the final relative residual.
  **/
 HYPRE_Int HYPRE_BoomerAMGGetFinalRelativeResidualNorm(HYPRE_Solver  solver,
@@ -1998,6 +2011,19 @@ HYPRE_Int HYPRE_FSAISetZeroGuess(HYPRE_Solver solver,
 HYPRE_Int HYPRE_FSAIGetSetupFlops(HYPRE_Solver solver,
                                   HYPRE_Real  *setup_flops);
 
+/**
+ * (Optional) Get the number of graph operations accumulated during FSAI setup.
+ **/
+HYPRE_Int HYPRE_FSAIGetSetupGraphOps(HYPRE_Solver solver,
+                                      HYPRE_Real  *setup_graph_ops);
+
+/**
+ * (Optional) Get the FSAI apply FLOPs per application.
+ * Computed as 2 * nnz(G) since FSAI apply is G^T * G * x (two SpMVs).
+ **/
+HYPRE_Int HYPRE_FSAIGetApplyFlops(HYPRE_Solver solver,
+                                   HYPRE_Real  *apply_flops);
+
 /**@}*/
 
 /*--------------------------------------------------------------------------
@@ -2338,6 +2364,20 @@ HYPRE_Int HYPRE_ParaSailsBuildIJMatrix(HYPRE_Solver    solver,
  **/
 HYPRE_Int HYPRE_ParaSailsGetSetupFlops(HYPRE_Solver  solver,
                                        HYPRE_Real   *setup_flops);
+
+/**
+ * (Optional) Get the number of graph operations accumulated during ParaSails setup.
+ **/
+HYPRE_Int HYPRE_ParaSailsGetSetupGraphOps(HYPRE_Solver  solver,
+                                           HYPRE_Real   *setup_graph_ops);
+
+/**
+ * (Optional) Get the ParaSails apply FLOPs per application.
+ * Returns nnz(M) for nonsymmetric mode, 2*nnz(M) for symmetric mode
+ * (M*u + M^T*v).
+ **/
+HYPRE_Int HYPRE_ParaSailsGetApplyFlops(HYPRE_Solver  solver,
+                                        HYPRE_Real   *apply_flops);
 
 /* ParCSRParaSails routines */
 

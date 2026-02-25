@@ -822,3 +822,58 @@ hypre_FSAIGetSetupFlops( void        *data,
 
    return hypre_error_flag;
 }
+
+/*--------------------------------------------------------------------------
+ * hypre_FSAIGetSetupGraphOps
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_FSAIGetSetupGraphOps( void        *data,
+                             HYPRE_Real  *setup_graph_ops )
+{
+   hypre_ParFSAIData  *fsai_data = (hypre_ParFSAIData*) data;
+
+   if (!fsai_data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+
+   *setup_graph_ops = hypre_ParFSAIDataSetupGraphOps(fsai_data);
+
+   return hypre_error_flag;
+}
+
+/*--------------------------------------------------------------------------
+ * hypre_FSAIGetApplyFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_FSAIGetApplyFlops( void        *data,
+                          HYPRE_Real  *apply_flops )
+{
+   hypre_ParFSAIData  *fsai_data = (hypre_ParFSAIData*) data;
+
+   if (!fsai_data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+
+   /* FSAI apply: M^{-1} = G^T G, so apply = G*x + G^T*y = 2 * nnz(G) FMAs.
+    * Compute nnz from the local CSR blocks since the global num_nonzeros
+    * field may not be set after FSAI setup. */
+   hypre_ParCSRMatrix *Gmat = hypre_ParFSAIDataGmat(fsai_data);
+   if (Gmat)
+   {
+      HYPRE_Int nnz_diag = hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(Gmat));
+      HYPRE_Int nnz_offd = hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(Gmat));
+      *apply_flops = 2.0 * (HYPRE_Real)(nnz_diag + nnz_offd);
+   }
+   else
+   {
+      *apply_flops = 0.0;
+   }
+
+   return hypre_error_flag;
+}

@@ -384,3 +384,25 @@ HYPRE_FSAIGetSetupFlops( HYPRE_Solver  solver,
 {
    return ( hypre_FSAIGetSetupFlops( (void *) solver, setup_flops ) );
 }
+
+/*--------------------------------------------------------------------------
+ * HYPRE_FSAIGetSetupGraphOps
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_FSAIGetSetupGraphOps( HYPRE_Solver  solver,
+                             HYPRE_Real   *setup_graph_ops )
+{
+   return ( hypre_FSAIGetSetupGraphOps( (void *) solver, setup_graph_ops ) );
+}
+
+/*--------------------------------------------------------------------------
+ * HYPRE_FSAIGetApplyFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_FSAIGetApplyFlops( HYPRE_Solver  solver,
+                          HYPRE_Real   *apply_flops )
+{
+   return ( hypre_FSAIGetApplyFlops( (void *) solver, apply_flops ) );
+}

@@ -2157,6 +2157,8 @@ HYPRE_Int hypre_FSAIGetLogging ( void *data, HYPRE_Int *logging );
 HYPRE_Int hypre_FSAIGetNumIterations ( void *data, HYPRE_Int *num_iterations );
 HYPRE_Int hypre_FSAIGetPrintLevel ( void *data, HYPRE_Int *print_level );
 HYPRE_Int hypre_FSAIGetSetupFlops ( void *data, HYPRE_Real *setup_flops );
+HYPRE_Int hypre_FSAIGetSetupGraphOps ( void *data, HYPRE_Real *setup_graph_ops );
+HYPRE_Int hypre_FSAIGetApplyFlops ( void *data, HYPRE_Real *apply_flops );
 
 /* par_fsai_setup.c */
 HYPRE_Int hypre_CSRMatrixExtractDenseMat ( hypre_CSRMatrix *A, hypre_Vector *A_sub,

@@ -943,3 +943,50 @@ HYPRE_ParaSailsGetSetupFlops(HYPRE_Solver solver, HYPRE_Real *setup_flops)
    return hypre_error_flag;
 #endif
 }
+
+/*--------------------------------------------------------------------------
+ * HYPRE_ParaSailsGetSetupGraphOps
+ *--------------------------------------------------------------------------*/
+HYPRE_Int
+HYPRE_ParaSailsGetSetupGraphOps(HYPRE_Solver solver, HYPRE_Real *setup_graph_ops)
+{
+#ifdef HYPRE_MIXEDINT
+   HYPRE_UNUSED_VAR(solver);
+   HYPRE_UNUSED_VAR(setup_graph_ops);
+
+   hypre_error_w_msg(HYPRE_ERROR_GENERIC, "ParaSails not usable in mixedint mode!");
+   return hypre_error_flag;
+#else
+
+   Secret *secret = (Secret *) solver;
+
+   hypre_ParaSailsGetSetupGraphOps(secret->obj, setup_graph_ops);
+
+   return hypre_error_flag;
+#endif
+}
+
+/*--------------------------------------------------------------------------
+ * HYPRE_ParaSailsGetApplyFlops
+ *--------------------------------------------------------------------------*/
+HYPRE_Int
+HYPRE_ParaSailsGetApplyFlops(HYPRE_Solver solver, HYPRE_Real *apply_flops)
+{
+#ifdef HYPRE_MIXEDINT
+   HYPRE_UNUSED_VAR(solver);
+   HYPRE_UNUSED_VAR(apply_flops);
+
+   hypre_error_w_msg(HYPRE_ERROR_GENERIC, "ParaSails not usable in mixedint mode!");
+   return hypre_error_flag;
+#else
+
+   Secret *secret = (Secret *) solver;
+   HYPRE_Int nnz_M;
+
+   hypre_ParaSailsGetNnzM(secret->obj, &nnz_M);
+   /* Symmetric mode: M*u + M^T*v = 2*nnz(M); nonsymmetric: M*u = nnz(M) */
+   *apply_flops = (secret->sym == 1) ? 2.0 * (HYPRE_Real) nnz_M : (HYPRE_Real) nnz_M;
+
+   return hypre_error_flag;
+#endif
+}
