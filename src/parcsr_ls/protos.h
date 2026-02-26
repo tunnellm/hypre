@@ -1174,6 +1174,9 @@ HYPRE_Int hypre_SchwarzSetDomainStructure ( void *data, hypre_CSRMatrix *domain_
 HYPRE_Int hypre_SchwarzSetScale ( void *data, HYPRE_Real *scale );
 HYPRE_Int hypre_SchwarzReScale ( void *data, HYPRE_Int size, HYPRE_Real value );
 HYPRE_Int hypre_SchwarzSetDofFunc ( void *data, HYPRE_Int *dof_func );
+HYPRE_Int hypre_SchwarzGetSetupFlops ( void *data, HYPRE_Real *setup_flops );
+HYPRE_Int hypre_SchwarzGetSetupGraphOps ( void *data, HYPRE_Real *setup_graph_ops );
+HYPRE_Int hypre_SchwarzGetApplyFlops ( void *data, HYPRE_Real *apply_flops );
 
 /* par_stats.c */
 HYPRE_Int hypre_BoomerAMGSetupStats ( void *amg_vdata, hypre_ParCSRMatrix *A );

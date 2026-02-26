@@ -4311,6 +4311,15 @@ HYPRE_Int HYPRE_SchwarzSetDofFunc(HYPRE_Solver  solver,
 HYPRE_Int HYPRE_SchwarzSetNonSymm(HYPRE_Solver solver,
                                   HYPRE_Int    use_nonsymm);
 
+HYPRE_Int HYPRE_SchwarzGetSetupFlops(HYPRE_Solver  solver,
+                                     HYPRE_Real   *setup_flops);
+
+HYPRE_Int HYPRE_SchwarzGetSetupGraphOps(HYPRE_Solver  solver,
+                                        HYPRE_Real   *setup_graph_ops);
+
+HYPRE_Int HYPRE_SchwarzGetApplyFlops(HYPRE_Solver  solver,
+                                     HYPRE_Real   *apply_flops);
+
 /*--------------------------------------------------------------------------
  *--------------------------------------------------------------------------*/
 

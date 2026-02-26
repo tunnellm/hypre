@@ -87,3 +87,9 @@ src/examples/ex5f
 src/examples/ex5f.exe
 src/examples/ex12f
 src/examples/ex12f.exe
+
+
+.claude
+.mcp*
+*.md*
+.serena

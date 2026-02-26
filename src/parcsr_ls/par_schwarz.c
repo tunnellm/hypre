@@ -60,6 +60,7 @@ hypre_SchwarzCreate( void )
    /* FLOP and graph op counting */
    hypre_SchwarzDataSetupFlops(schwarz_data) = 0.0;
    hypre_SchwarzDataSetupGraphOps(schwarz_data) = 0.0;
+   hypre_SchwarzDataApplyFlops(schwarz_data) = 0.0;
 
    return (void *) schwarz_data;
 }
@@ -184,35 +185,106 @@ hypre_SchwarzSetup(void               *schwarz_vdata,
    hypre_SchwarzDataDomainStructure(schwarz_data) = domain_structure;
    hypre_SchwarzDataPivots(schwarz_data) = pivots;
 
-   /* Initialize FLOP and graph op counts for Schwarz setup.
-    * Basic estimates are set here; more detailed calculations are done
-    * in par_amg_setup.c when Schwarz is used as an AMG smoother.
-    * Factorization: ~(1/3)*sum(domain_size^3) for LU
-    * Graph: domain construction traverses A's sparsity pattern
-    */
+   /* Compute FLOP, graph op, and apply cost for Schwarz.
+    * These are the authoritative values; AMG setup reads them when
+    * Schwarz is used as a smoother. */
    if (domain_structure)
    {
       HYPRE_Int num_domains = hypre_CSRMatrixNumRows(domain_structure);
       HYPRE_Int *domain_i = hypre_CSRMatrixI(domain_structure);
-      HYPRE_Real setup_flops = 0.0;
+      HYPRE_Real nnz_A = (HYPRE_Real)(hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A)) +
+                                      hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A)));
+      HYPRE_Real n_A = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A);
+      HYPRE_Real sum_di = 0.0, sum_di2 = 0.0, sum_di3 = 0.0;
       HYPRE_Int d;
 
-      /* For each domain, LU factorization costs ~domain_size^3/3 FLOPs */
       for (d = 0; d < num_domains; d++)
       {
-         HYPRE_Real domain_size = (HYPRE_Real)(domain_i[d + 1] - domain_i[d]);
-         setup_flops += domain_size * domain_size * domain_size / 3.0;
+         HYPRE_Real di = (HYPRE_Real)(domain_i[d + 1] - domain_i[d]);
+         sum_di  += di;
+         sum_di2 += di * di;
+         sum_di3 += di * di * di;
       }
 
-      hypre_SchwarzDataSetupFlops(schwarz_data) = setup_flops;
-      /* Graph ops: basic estimate, refined by AMG setup when used as smoother */
-      hypre_SchwarzDataSetupGraphOps(schwarz_data) =
-         (HYPRE_Real) hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A));
+      /* Setup: factorization cost.
+       * Cholesky (symmetric, variant 0/1): d_i^3/6 per domain.
+       * LU (nonsymmetric, variant 2/3):    d_i^3/3 per domain. */
+      {
+         HYPRE_Real fact_coeff = use_nonsymm ? (1.0 / 3.0) : (1.0 / 6.0);
+         hypre_SchwarzDataSetupFlops(schwarz_data) = fact_coeff * sum_di3;
+      }
+
+      /* Setup: graph ops for domain construction and extraction */
+      {
+         HYPRE_Real graph_cost = 0.0;
+
+         /* Extraction: each domain scans A rows for its DOFs */
+         if (n_A > 0.0)
+         {
+            graph_cost += sum_di * nnz_A / n_A;
+         }
+
+         if (domain_type == 2)
+         {
+            /* Agglomeration: 4*nnz(A) + AE search */
+            graph_cost += 4.0 * nnz_A;
+            if (overlap == 1 && num_domains > 0)
+            {
+               HYPRE_Real avg_ovlp = (sum_di - n_A) / (HYPRE_Real) num_domains;
+               HYPRE_Real sum_si2 = sum_di2 - 2.0 * avg_ovlp * sum_di
+                                    + avg_ovlp * avg_ovlp * (HYPRE_Real) num_domains;
+               graph_cost += sum_si2 * nnz_A / n_A;
+            }
+            else if (n_A > 0.0)
+            {
+               /* No overlap: s_i = d_i */
+               graph_cost += sum_di2 * nnz_A / n_A;
+            }
+         }
+
+         if (overlap == 1)
+         {
+            /* Overlap extension: 4*nnz(A) */
+            graph_cost += 4.0 * nnz_A;
+         }
+
+         hypre_SchwarzDataSetupGraphOps(schwarz_data) = graph_cost;
+      }
+
+      /* Apply cost per solve application.
+       * Dense triangular solve: dpotrs/dgetrs = 2*d_i^2 FMAs per domain per call.
+       * Residual computation per domain per sweep:
+       *   Multiplicative (0, 3, 4): per-domain sparse residual ~ sum(d_i)*nnz(A)/n
+       *   Additive (1, 2): one global matvec = nnz(A)
+       * Multiplicative variants (0, 3): forward + backward sweep = 2 sweeps.
+       * Others (1, 2, 4): single sweep. */
+      {
+         HYPRE_Int num_sweeps = (variant == 0 || variant == 3) ? 2 : 1;
+         HYPRE_Real solve_cost = 2.0 * (HYPRE_Real) num_sweeps * sum_di2;
+         HYPRE_Real residual_cost = 0.0;
+
+         if (variant == 0 || variant == 3 || variant == 4)
+         {
+            /* Per-domain sparse residual: each DOF scans its row in A */
+            if (n_A > 0.0)
+            {
+               residual_cost = (HYPRE_Real) num_sweeps * sum_di * nnz_A / n_A;
+            }
+         }
+         else
+         {
+            /* Additive: one global matvec */
+            residual_cost = nnz_A;
+         }
+
+         hypre_SchwarzDataApplyFlops(schwarz_data) = solve_cost + residual_cost;
+      }
    }
    else
    {
       hypre_SchwarzDataSetupFlops(schwarz_data) = 0.0;
       hypre_SchwarzDataSetupGraphOps(schwarz_data) = 0.0;
+      hypre_SchwarzDataApplyFlops(schwarz_data) = 0.0;
    }
 
    return hypre_error_flag;
@@ -440,5 +512,29 @@ hypre_SchwarzSetDofFunc( void *data, HYPRE_Int *dof_func)
 
    hypre_SchwarzDataDofFunc(schwarz_data) = dof_func;
 
+   return hypre_error_flag;
+}
+
+HYPRE_Int
+hypre_SchwarzGetSetupFlops( void *data, HYPRE_Real *setup_flops )
+{
+   hypre_SchwarzData *schwarz_data = (hypre_SchwarzData *) data;
+   *setup_flops = hypre_SchwarzDataSetupFlops(schwarz_data);
+   return hypre_error_flag;
+}
+
+HYPRE_Int
+hypre_SchwarzGetSetupGraphOps( void *data, HYPRE_Real *setup_graph_ops )
+{
+   hypre_SchwarzData *schwarz_data = (hypre_SchwarzData *) data;
+   *setup_graph_ops = hypre_SchwarzDataSetupGraphOps(schwarz_data);
+   return hypre_error_flag;
+}
+
+HYPRE_Int
+hypre_SchwarzGetApplyFlops( void *data, HYPRE_Real *apply_flops )
+{
+   hypre_SchwarzData *schwarz_data = (hypre_SchwarzData *) data;
+   *apply_flops = hypre_SchwarzDataApplyFlops(schwarz_data);
    return hypre_error_flag;
 }

@@ -1864,6 +1864,10 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                      HYPRE_Int pmis_iters_e1 = hypre_BoomerAMGCoarsenPMISNumIters();
                      coarsen_graph_ops_e1 = nnz_S + n_S + (HYPRE_Real) pmis_iters_e1 * 2.0 * nnz_S;
                   }
+                  else if (coarsen_type == 21 || coarsen_type == 22)
+                  {
+                     coarsen_graph_ops_e1 = nnz_S + n_S + (HYPRE_Real) cgc_its * 2.0 * nnz_S;
+                  }
                   else
                   {
                      coarsen_graph_ops_e1 = 6.0 * nnz_S;
@@ -1963,6 +1967,10 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   {
                      HYPRE_Int pmis_iters_e2 = hypre_BoomerAMGCoarsenPMISNumIters();
                      coarsen_graph_ops_e2 = nnz_S + n_S + (HYPRE_Real) pmis_iters_e2 * 2.0 * nnz_S;
+                  }
+                  else if (coarsen_type == 21 || coarsen_type == 22)
+                  {
+                     coarsen_graph_ops_e2 = nnz_S + n_S + (HYPRE_Real) cgc_its * 2.0 * nnz_S;
                   }
                   else
                   {
@@ -5233,81 +5241,12 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                             (HYPRE_ParVector) f,
                             (HYPRE_ParVector) u);
 
-         /* Schwarz setup cost: domain construction (graph) + local factorizations (numerical).
-            Factorization: sum_i (1/6) d_i^3 FMAs (Cholesky, symmetric) or (1/3) d_i^3 FMAs (LU, nonsymmetric).
-            Graph: agglomeration ~4*nnz(A) + AE search sum(s_i^2)*nnz(A)/n,
-                   overlap ~4*nnz(A), extraction ~sum(d_i)*nnz(A)/n.
-            Uses d_i from domain structure; estimates s_i from d_i and average overlap. */
+         /* Schwarz costs are computed in hypre_SchwarzSetup; read them here */
          {
             hypre_SchwarzData *sd = (hypre_SchwarzData *) smoother[j];
-            hypre_CSRMatrix *ds = hypre_SchwarzDataDomainStructure(sd);
-            if (ds)
-            {
-               HYPRE_Int *i_dd = hypre_CSRMatrixI(ds);
-               HYPRE_Int n_dom = hypre_CSRMatrixNumRows(ds);
-               HYPRE_Int schwarz_overlap = hypre_SchwarzDataOverlap(sd);
-               HYPRE_Int schwarz_domain_type = hypre_SchwarzDataDomainType(sd);
-               HYPRE_Int schwarz_nonsymm = hypre_SchwarzDataUseNonSymm(sd);
-               HYPRE_Real nnz_Aj = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
-                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
-               HYPRE_Real n_j = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);
-               HYPRE_Real sum_di = 0.0, sum_di2 = 0.0, sum_di3 = 0.0;
-               HYPRE_Real fact_coeff = schwarz_nonsymm ? (1.0 / 3.0) : (1.0 / 6.0);
-               HYPRE_Int ii;
-
-               for (ii = 0; ii < n_dom; ii++)
-               {
-                  HYPRE_Real di = (HYPRE_Real)(i_dd[ii + 1] - i_dd[ii]);
-                  sum_di  += di;
-                  sum_di2 += di * di;
-                  sum_di3 += di * di * di;
-               }
-
-               /* Factorization cost */
-               {
-                  HYPRE_Real fact_cost = fact_coeff * sum_di3;
-                  hypre_ParAMGDataSetupFlops(amg_data) += fact_cost;
-                  hypre_SchwarzDataSetupFlops(sd) = fact_cost;
-               }
-
-               /* Graph cost */
-               {
-                  HYPRE_Real graph_cost = 0.0;
-                  /* Extraction: each domain scans A rows for its DOFs */
-                  graph_cost += sum_di * nnz_Aj / n_j;
-
-                  if (schwarz_domain_type == 2)
-                  {
-                     /* Agglomeration: 4*nnz(A) + AE search */
-                     graph_cost += 4.0 * nnz_Aj;
-                     /* AE search: sum s_i^2 * nnz(A)/n, estimate s_i from d_i */
-                     if (schwarz_overlap == 1 && n_dom > 0)
-                     {
-                        HYPRE_Real avg_ovlp = (sum_di - n_j) / (HYPRE_Real) n_dom;
-                        HYPRE_Real sum_si2 = sum_di2 - 2.0 * avg_ovlp * sum_di
-                                             + avg_ovlp * avg_ovlp * (HYPRE_Real) n_dom;
-                        graph_cost += sum_si2 * nnz_Aj / n_j;
-                     }
-                     else
-                     {
-                        /* No overlap: s_i = d_i */
-                        graph_cost += sum_di2 * nnz_Aj / n_j;
-                     }
-                  }
-
-                  if (schwarz_overlap == 1)
-                  {
-                     /* Overlap extension: 4*nnz(A) */
-                     graph_cost += 4.0 * nnz_Aj;
-                  }
-
-                  hypre_ParAMGDataSetupGraphOps(amg_data) += graph_cost;
-                  hypre_SchwarzDataSetupGraphOps(sd) = graph_cost;
-               }
-
-               /* Solve cost: forward+backward substitution on each domain = sum(d_i^2) FMAs */
-               hypre_ParAMGDataSmootherSolveFlops(amg_data)[j] = sum_di2;
-            }
+            hypre_ParAMGDataSetupFlops(amg_data) += hypre_SchwarzDataSetupFlops(sd);
+            hypre_ParAMGDataSetupGraphOps(amg_data) += hypre_SchwarzDataSetupGraphOps(sd);
+            hypre_ParAMGDataSmootherSolveFlops(amg_data)[j] = hypre_SchwarzDataApplyFlops(sd);
          }
 
          if (schwarz_relax_wt < 0 )

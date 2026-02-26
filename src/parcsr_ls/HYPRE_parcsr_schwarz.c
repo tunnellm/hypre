@@ -155,3 +155,36 @@ HYPRE_SchwarzSetDofFunc( HYPRE_Solver  solver,
    return ( hypre_SchwarzSetDofFunc( (void *) solver, dof_func ) );
 }
 
+/*--------------------------------------------------------------------------
+ * HYPRE_SchwarzGetSetupFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_SchwarzGetSetupFlops( HYPRE_Solver  solver,
+                            HYPRE_Real   *setup_flops )
+{
+   return ( hypre_SchwarzGetSetupFlops( (void *) solver, setup_flops ) );
+}
+
+/*--------------------------------------------------------------------------
+ * HYPRE_SchwarzGetSetupGraphOps
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_SchwarzGetSetupGraphOps( HYPRE_Solver  solver,
+                               HYPRE_Real   *setup_graph_ops )
+{
+   return ( hypre_SchwarzGetSetupGraphOps( (void *) solver, setup_graph_ops ) );
+}
+
+/*--------------------------------------------------------------------------
+ * HYPRE_SchwarzGetApplyFlops
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_SchwarzGetApplyFlops( HYPRE_Solver  solver,
+                            HYPRE_Real   *apply_flops )
+{
+   return ( hypre_SchwarzGetApplyFlops( (void *) solver, apply_flops ) );
+}
+

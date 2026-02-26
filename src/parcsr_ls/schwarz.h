@@ -31,6 +31,7 @@ typedef struct
    /* FLOP and graph op counting */
    HYPRE_Real    setup_flops;      /* FLOPs accumulated during setup */
    HYPRE_Real    setup_graph_ops;  /* Graph ops accumulated during setup */
+   HYPRE_Real    apply_flops;      /* FLOPs per solve application */
 
 } hypre_SchwarzData;
 
@@ -58,6 +59,7 @@ typedef struct
 /* FLOP and graph op counting */
 #define hypre_SchwarzDataSetupFlops(schwarz_data) ((schwarz_data)->setup_flops)
 #define hypre_SchwarzDataSetupGraphOps(schwarz_data) ((schwarz_data)->setup_graph_ops)
+#define hypre_SchwarzDataApplyFlops(schwarz_data) ((schwarz_data)->apply_flops)
 
 #endif
 
