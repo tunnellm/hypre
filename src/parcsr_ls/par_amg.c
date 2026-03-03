@@ -5320,6 +5320,45 @@ hypre_BoomerAMGGetSolveFlops( void       *data,
       hypre_error_in_arg(2);
       return hypre_error_flag;
    }
+
+   /* Re-measure per-cycle cost by running a dummy cycle.  This allows
+    * callers to change apply-time parameters (e.g. cycle_type) after
+    * setup and get an accurate cost without rebuilding the hierarchy. */
+   {
+      HYPRE_Int num_levels    = hypre_ParAMGDataNumLevels(amg_data);
+      HYPRE_Int additive      = hypre_ParAMGDataAdditive(amg_data);
+      HYPRE_Int mult_additive = hypre_ParAMGDataMultAdditive(amg_data);
+      HYPRE_Int simple        = hypre_ParAMGDataSimple(amg_data);
+
+      hypre_ParVector **F_array = hypre_ParAMGDataFArray(amg_data);
+      hypre_ParVector **U_array = hypre_ParAMGDataUArray(amg_data);
+
+      /* Save and reset cycle op count */
+      HYPRE_Real saved_op_count = hypre_ParAMGDataCycleOpCount(amg_data);
+      hypre_ParAMGDataCycleOpCount(amg_data) = 0.0;
+
+      /* Random RHS, zero initial guess */
+      hypre_ParVectorSetRandomValues(F_array[0], 1);
+      hypre_ParVectorSetZeros(U_array[0]);
+
+      /* Dispatch to the correct cycle type */
+      if ((additive      < 0 || additive      >= num_levels) &&
+          (mult_additive < 0 || mult_additive >= num_levels) &&
+          (simple        < 0 || simple        >= num_levels))
+      {
+         hypre_BoomerAMGCycle(amg_data, F_array, U_array);
+      }
+      else
+      {
+         hypre_ParVectorAllZeros(U_array[0]) = 0;
+         hypre_BoomerAMGAdditiveCycle(amg_data);
+      }
+
+      /* Store measured cost and restore op count */
+      hypre_ParAMGDataSolveFlops(amg_data) = hypre_ParAMGDataCycleOpCount(amg_data);
+      hypre_ParAMGDataCycleOpCount(amg_data) = saved_op_count;
+   }
+
    *solve_flops = hypre_ParAMGDataSolveFlops(amg_data);
 
    return hypre_error_flag;

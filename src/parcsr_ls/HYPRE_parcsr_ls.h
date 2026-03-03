@@ -4320,6 +4320,9 @@ HYPRE_Int HYPRE_SchwarzGetSetupGraphOps(HYPRE_Solver  solver,
 HYPRE_Int HYPRE_SchwarzGetApplyFlops(HYPRE_Solver  solver,
                                      HYPRE_Real   *apply_flops);
 
+HYPRE_Int HYPRE_SchwarzGetMaxDomainOverlap(HYPRE_Solver  solver,
+                                            HYPRE_Int    *max_overlap);
+
 /*--------------------------------------------------------------------------
  *--------------------------------------------------------------------------*/
 

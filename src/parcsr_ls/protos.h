@@ -1177,6 +1177,7 @@ HYPRE_Int hypre_SchwarzSetDofFunc ( void *data, HYPRE_Int *dof_func );
 HYPRE_Int hypre_SchwarzGetSetupFlops ( void *data, HYPRE_Real *setup_flops );
 HYPRE_Int hypre_SchwarzGetSetupGraphOps ( void *data, HYPRE_Real *setup_graph_ops );
 HYPRE_Int hypre_SchwarzGetApplyFlops ( void *data, HYPRE_Real *apply_flops );
+HYPRE_Int hypre_SchwarzGetMaxDomainOverlap ( void *data, HYPRE_Int *max_overlap );
 
 /* par_stats.c */
 HYPRE_Int hypre_BoomerAMGSetupStats ( void *amg_vdata, hypre_ParCSRMatrix *A );

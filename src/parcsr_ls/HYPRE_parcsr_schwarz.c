@@ -188,3 +188,14 @@ HYPRE_SchwarzGetApplyFlops( HYPRE_Solver  solver,
    return ( hypre_SchwarzGetApplyFlops( (void *) solver, apply_flops ) );
 }
 
+/*--------------------------------------------------------------------------
+ * HYPRE_SchwarzGetMaxDomainOverlap
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+HYPRE_SchwarzGetMaxDomainOverlap( HYPRE_Solver  solver,
+                                  HYPRE_Int    *max_overlap )
+{
+   return ( hypre_SchwarzGetMaxDomainOverlap( (void *) solver, max_overlap ) );
+}
+

@@ -538,3 +538,49 @@ hypre_SchwarzGetApplyFlops( void *data, HYPRE_Real *apply_flops )
    *apply_flops = hypre_SchwarzDataApplyFlops(schwarz_data);
    return hypre_error_flag;
 }
+
+/*--------------------------------------------------------------------------
+ * hypre_SchwarzGetMaxDomainOverlap
+ *
+ * After setup, compute the maximum number of domains that any single DOF
+ * belongs to.  This is useful for choosing additive Schwarz relaxation
+ * weights (a common choice is relax_weight = 1 / max_overlap).
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int
+hypre_SchwarzGetMaxDomainOverlap( void *data, HYPRE_Int *max_overlap )
+{
+   hypre_SchwarzData *schwarz_data = (hypre_SchwarzData *) data;
+   hypre_CSRMatrix   *ds = hypre_SchwarzDataDomainStructure(schwarz_data);
+
+   if (!ds)
+   {
+      *max_overlap = 0;
+      return hypre_error_flag;
+   }
+
+   HYPRE_Int  num_domains = hypre_CSRMatrixNumRows(ds);
+   HYPRE_Int  num_dofs    = hypre_CSRMatrixNumCols(ds);
+   HYPRE_Int *I           = hypre_CSRMatrixI(ds);
+   HYPRE_Int *J           = hypre_CSRMatrixJ(ds);
+   HYPRE_Int  nnz         = I[num_domains];
+
+   HYPRE_Int *count = hypre_CTAlloc(HYPRE_Int, num_dofs, HYPRE_MEMORY_HOST);
+   HYPRE_Int  k, max_val = 0;
+
+   for (k = 0; k < nnz; k++)
+   {
+      count[J[k]]++;
+   }
+   for (k = 0; k < num_dofs; k++)
+   {
+      if (count[k] > max_val)
+      {
+         max_val = count[k];
+      }
+   }
+
+   hypre_TFree(count, HYPRE_MEMORY_HOST);
+   *max_overlap = max_val;
+   return hypre_error_flag;
+}
