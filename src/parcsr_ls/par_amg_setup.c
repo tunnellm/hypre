@@ -1014,6 +1014,7 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 
    /* Initialize setup FLOP counter - will be accumulated during setup */
    hypre_ParAMGDataSetupFlops(amg_data) = 0.0;
+   hypre_ParAMGDataSetupGraphOps(amg_data) = 0.0;
 
    while (not_finished_coarsening)
    {
@@ -1768,33 +1769,6 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   num_grid_sweeps[3] = 1;
                   if (grid_relax_points) { grid_relax_points[3][0] = 0; }
                }
-               if (S) { hypre_ParCSRMatrixDestroy(S); }
-               if (SN) { hypre_ParCSRMatrixDestroy(SN); }
-               if (AN) { hypre_ParCSRMatrixDestroy(AN); }
-               //hypre_TFree(CF_marker, HYPRE_MEMORY_HOST);
-               if (level > 0)
-               {
-                  /* note special case treatment of CF_marker is necessary
-                   * to do CF relaxation correctly when num_levels = 1 */
-                  hypre_IntArrayDestroy(CF_marker_array[level]);
-                  CF_marker_array[level] = NULL;
-                  hypre_ParVectorDestroy(F_array[level]);
-                  hypre_ParVectorDestroy(U_array[level]);
-               }
-               coarse_size = fine_size;
-
-               if (Sabs)
-               {
-                  hypre_ParCSRMatrixDestroy(Sabs);
-                  Sabs = NULL;
-               }
-
-               if (coarse_dof_func)
-               {
-                  hypre_IntArrayDestroy(coarse_dof_func);
-                  coarse_dof_func = NULL;
-               }
-
                /* Accumulate SOC cost before early exit (coarse_size == 0 or fine_size) */
                {
                   HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[level])) +
@@ -1802,12 +1776,6 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   HYPRE_Real n_A = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
                   if (hypre_ParAMGDataGSMG(amg_data))
                   {
-                     /* GSMG SOC: CreateSmoothVecs + FillSmooth + ChooseThresh + Threshold
-                      * SmoothVecs: nsamples relaxation sweeps (nsamples * num_sweeps * nnz FMA)
-                      *             + rand generation (nsamples * n graph) + subtract (nsamples * n FMA)
-                      * FillSmooth: normalize (nsamples * (2n+3) FMA)
-                      *             + distances ((nnz-n) * (2*nsamples+1) FMA, (nnz-n) * nsamples graph)
-                      * ChooseThresh: max/min search (nnz + n graph) */
                      HYPRE_Int nsamples = hypre_ParAMGDataNumSamples(amg_data);
                      HYPRE_Int num_sweeps_sv = hypre_ParAMGDataNumGridSweeps(amg_data)[1];
                      HYPRE_Real ns = (HYPRE_Real) nsamples;
@@ -1820,10 +1788,6 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   }
                   else
                   {
-                     /* Standard/Sabs SOC
-                      * Numerical: nnz(A) + n (row_sum adds + n threshold muls)
-                      * Graph: standard = (nnz-n) max/min search + 2n abs = nnz+n
-                      *        Sabs = adds abs per entry, see main path comment */
                      HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
                      HYPRE_Int used_sabs_early = 0;
                      if (nodal > 0 && nodal != 4)
@@ -1845,10 +1809,9 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                      }
                   }
                }
-               /* Coarsening cost (early exit path) - same logic as main path */
+               /* Coarsening cost (early exit path) - must read S BEFORE destroying it */
                if (S != NULL)
                {
-                  /* Compute nnz from local CSR data (global num_nonzeros may not be set) */
                   hypre_CSRMatrix *S_diag_e1 = hypre_ParCSRMatrixDiag(S);
                   hypre_CSRMatrix *S_offd_e1 = hypre_ParCSRMatrixOffd(S);
                   HYPRE_Real nnz_S = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(S_diag_e1) +
@@ -1876,26 +1839,16 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   hypre_ParAMGDataSetupGraphOps(amg_data) += coarsen_graph_ops_e1;
                }
 
-               HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
-               break;
-            }
-
-            if (coarse_size < min_coarse_size)
-            {
-               hypre_ParCSRMatrixDestroy(S);
-               hypre_ParCSRMatrixDestroy(SN);
-               hypre_ParCSRMatrixDestroy(AN);
-
-               if (num_functions > 1)
-               {
-                  hypre_IntArrayDestroy(coarse_dof_func);
-                  coarse_dof_func = NULL;
-               }
-
-               hypre_IntArrayDestroy(CF_marker_array[level]);
-               CF_marker_array[level] = NULL;
+               if (S) { hypre_ParCSRMatrixDestroy(S); }
+               if (SN) { hypre_ParCSRMatrixDestroy(SN); }
+               if (AN) { hypre_ParCSRMatrixDestroy(AN); }
+               //hypre_TFree(CF_marker, HYPRE_MEMORY_HOST);
                if (level > 0)
                {
+                  /* note special case treatment of CF_marker is necessary
+                   * to do CF relaxation correctly when num_levels = 1 */
+                  hypre_IntArrayDestroy(CF_marker_array[level]);
+                  CF_marker_array[level] = NULL;
                   hypre_ParVectorDestroy(F_array[level]);
                   hypre_ParVectorDestroy(U_array[level]);
                }
@@ -1907,6 +1860,18 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   Sabs = NULL;
                }
 
+               if (coarse_dof_func)
+               {
+                  hypre_IntArrayDestroy(coarse_dof_func);
+                  coarse_dof_func = NULL;
+               }
+
+               HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
+               break;
+            }
+
+            if (coarse_size < min_coarse_size)
+            {
                /* Accumulate SOC cost before early exit (coarse_size < min_coarse_size) */
                {
                   HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[level])) +
@@ -1914,7 +1879,6 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   HYPRE_Real n_A = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
                   if (hypre_ParAMGDataGSMG(amg_data))
                   {
-                     /* GSMG SOC (same formula as other early exit path) */
                      HYPRE_Int nsamples = hypre_ParAMGDataNumSamples(amg_data);
                      HYPRE_Int num_sweeps_sv = hypre_ParAMGDataNumGridSweeps(amg_data)[1];
                      HYPRE_Real ns = (HYPRE_Real) nsamples;
@@ -1927,7 +1891,6 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   }
                   else
                   {
-                     /* Standard/Sabs SOC */
                      HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
                      HYPRE_Int used_sabs_early = 0;
                      if (nodal > 0 && nodal != 4)
@@ -1949,10 +1912,9 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                      }
                   }
                }
-               /* Coarsening cost (early exit path) - same logic as main path */
+               /* Coarsening cost (early exit path) - must read S BEFORE destroying it */
                if (S != NULL)
                {
-                  /* Compute nnz from local CSR data (global num_nonzeros may not be set) */
                   hypre_CSRMatrix *S_diag_e2 = hypre_ParCSRMatrixDiag(S);
                   hypre_CSRMatrix *S_offd_e2 = hypre_ParCSRMatrixOffd(S);
                   HYPRE_Real nnz_S = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(S_diag_e2) +
@@ -1978,6 +1940,31 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   }
                   hypre_ParAMGDataSetupFlops(amg_data) += n_S;
                   hypre_ParAMGDataSetupGraphOps(amg_data) += coarsen_graph_ops_e2;
+               }
+
+               hypre_ParCSRMatrixDestroy(S);
+               hypre_ParCSRMatrixDestroy(SN);
+               hypre_ParCSRMatrixDestroy(AN);
+
+               if (num_functions > 1)
+               {
+                  hypre_IntArrayDestroy(coarse_dof_func);
+                  coarse_dof_func = NULL;
+               }
+
+               hypre_IntArrayDestroy(CF_marker_array[level]);
+               CF_marker_array[level] = NULL;
+               if (level > 0)
+               {
+                  hypre_ParVectorDestroy(F_array[level]);
+                  hypre_ParVectorDestroy(U_array[level]);
+               }
+               coarse_size = fine_size;
+
+               if (Sabs)
+               {
+                  hypre_ParCSRMatrixDestroy(Sabs);
+                  Sabs = NULL;
                }
 
                HYPRE_ANNOTATE_REGION_END("%s", "Coarsening");
@@ -5789,6 +5776,8 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       hypre_ParAMGDataSolveFlops(amg_data) = hypre_ParAMGDataCycleOpCount(amg_data);
       hypre_ParAMGDataCycleOpCount(amg_data) = saved_op_count;
    }
+
+
 
    return (hypre_error_flag);
 }
