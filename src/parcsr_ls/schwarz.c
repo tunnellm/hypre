@@ -351,7 +351,7 @@ hypre_AMGNodalSchwarzSmoother( hypre_CSRMatrix  *A,
    hypre_TFree(i_int_to_local, HYPRE_MEMORY_HOST);
    hypre_TFree(i_local_to_global, HYPRE_MEMORY_HOST);
 
-   domain_structure = hypre_CSRMatrixCreate(num_domains, max_local_dof_counter,
+   domain_structure = hypre_CSRMatrixCreate(num_domains, num_dofs,
                                             i_domain_dof[num_domains]);
    hypre_CSRMatrixI(domain_structure) = i_domain_dof;
    hypre_CSRMatrixJ(domain_structure) = j_domain_dof;
@@ -1954,7 +1954,7 @@ hypre_AMGCreateDomainDof(hypre_CSRMatrix  *A,
    hypre_TFree(i_local_to_global, HYPRE_MEMORY_HOST);
    hypre_TFree(i_global_to_local, HYPRE_MEMORY_HOST);
 
-   domain_structure = hypre_CSRMatrixCreate(num_domains, max_local_dof_counter,
+   domain_structure = hypre_CSRMatrixCreate(num_domains, num_dofs,
                                             i_domain_dof[num_domains]);
 
    hypre_CSRMatrixMemoryLocation(domain_structure) = HYPRE_MEMORY_HOST;
@@ -3798,7 +3798,7 @@ hypre_ParAMGCreateDomainDof(hypre_ParCSRMatrix   *A,
    hypre_TFree(i_global_to_local, HYPRE_MEMORY_HOST);
    hypre_CSRMatrixDestroy(A_ext);
 
-   domain_structure = hypre_CSRMatrixCreate(num_domains, max_local_dof_counter,
+   domain_structure = hypre_CSRMatrixCreate(num_domains, num_variables + num_cols_offd,
                                             i_domain_dof[num_domains]);
 
    hypre_CSRMatrixI(domain_structure) = i_domain_dof;
