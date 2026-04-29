@@ -330,6 +330,8 @@ hypre_CSRMatrix *hypre_CSRMatrixAdd ( HYPRE_Complex alpha, hypre_CSRMatrix *A, H
 hypre_CSRMatrix *hypre_CSRMatrixBigAdd ( hypre_CSRMatrix *A, hypre_CSRMatrix *B );
 hypre_CSRMatrix *hypre_CSRMatrixMultiplyHost ( hypre_CSRMatrix *A, hypre_CSRMatrix *B );
 hypre_CSRMatrix *hypre_CSRMatrixMultiply ( hypre_CSRMatrix *A, hypre_CSRMatrix *B );
+HYPRE_Real hypre_CSRMatrixSpMMFlopsHost ( hypre_CSRMatrix *A, hypre_CSRMatrix *B );
+HYPRE_Int *hypre_CSRMatrixSpMMRowNnzHost ( hypre_CSRMatrix *A, hypre_CSRMatrix *B );
 hypre_CSRMatrix *hypre_CSRMatrixDeleteZeros ( hypre_CSRMatrix *A, HYPRE_Real tol );
 HYPRE_Int hypre_CSRMatrixTransposeHost ( hypre_CSRMatrix *A, hypre_CSRMatrix **AT, HYPRE_Int data );
 HYPRE_Int hypre_CSRMatrixTranspose ( hypre_CSRMatrix *A, hypre_CSRMatrix **AT, HYPRE_Int data );

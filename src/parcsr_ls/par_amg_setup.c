@@ -2295,21 +2295,12 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   {
                      P = hypre_ParMatmul(P1, P2);
                   }
-                  /* P1*P2 SpGEMM cost: nnz(P1) * nnz(P2) / n_coarse1, equal for FMA and graph */
+                  /* P1*P2 SpGEMM cost: exact scalar FMA via local index walk. */
                   {
-                     HYPRE_Real pp_nnz_P1 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
-                        hypre_ParCSRMatrixDiag(P1)) + hypre_CSRMatrixNumNonzeros(
-                        hypre_ParCSRMatrixOffd(P1)));
-                     HYPRE_Real pp_nnz_P2 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
-                        hypre_ParCSRMatrixDiag(P2)) + hypre_CSRMatrixNumNonzeros(
-                        hypre_ParCSRMatrixOffd(P2)));
-                     HYPRE_Real pp_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumCols(P1);
-                     if (pp_n > 0)
-                     {
-                        HYPRE_Real pp_cost = pp_nnz_P1 * pp_nnz_P2 / pp_n;
-                        hypre_ParAMGDataSetupFlops(amg_data) += pp_cost;
-                        hypre_ParAMGDataSetupGraphOps(amg_data) += pp_cost;
-                     }
+                     HYPRE_Real pp_cost = hypre_CSRMatrixSpMMFlopsHost(
+                        hypre_ParCSRMatrixDiag(P1), hypre_ParCSRMatrixDiag(P2));
+                     hypre_ParAMGDataSetupFlops(amg_data) += pp_cost;
+                     hypre_ParAMGDataSetupGraphOps(amg_data) += pp_cost;
                   }
 
                   hypre_BoomerAMGInterpTruncation(P, agg_trunc_factor, agg_P_max_elmts);
@@ -2502,21 +2493,12 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                   {
                      P = hypre_ParMatmul(P1, P2);
                   }
-                  /* P1*P2 SpGEMM cost: nnz(P1) * nnz(P2) / n_coarse1, equal for FMA and graph */
+                  /* P1*P2 SpGEMM cost: exact scalar FMA via local index walk. */
                   {
-                     HYPRE_Real pp_nnz_P1 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
-                        hypre_ParCSRMatrixDiag(P1)) + hypre_CSRMatrixNumNonzeros(
-                        hypre_ParCSRMatrixOffd(P1)));
-                     HYPRE_Real pp_nnz_P2 = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(
-                        hypre_ParCSRMatrixDiag(P2)) + hypre_CSRMatrixNumNonzeros(
-                        hypre_ParCSRMatrixOffd(P2)));
-                     HYPRE_Real pp_n = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumCols(P1);
-                     if (pp_n > 0)
-                     {
-                        HYPRE_Real pp_cost = pp_nnz_P1 * pp_nnz_P2 / pp_n;
-                        hypre_ParAMGDataSetupFlops(amg_data) += pp_cost;
-                        hypre_ParAMGDataSetupGraphOps(amg_data) += pp_cost;
-                     }
+                     HYPRE_Real pp_cost = hypre_CSRMatrixSpMMFlopsHost(
+                        hypre_ParCSRMatrixDiag(P1), hypre_ParCSRMatrixDiag(P2));
+                     hypre_ParAMGDataSetupFlops(amg_data) += pp_cost;
+                     hypre_ParAMGDataSetupGraphOps(amg_data) += pp_cost;
                   }
 
                   hypre_BoomerAMGInterpTruncation(P, agg_trunc_factor,
@@ -4485,42 +4467,68 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
       hypre_ParCSRMatrixPrintIJ(P_array[level], 0, 0, file);
 #endif
 
-      /* Accumulate RAP (Galerkin triple product) cost
-       * Two SpGEMMs: Q = A*P, then A_H = R*Q (R = P^T in standard Galerkin)
-       * Graph (symbolic): nnz(A)*nnz(P)/n + nnz(R)*nnz(Q)/n ≈ 2*nnz(A)*nnz(P)/n
-       * Numerical (FMA):  nnz(A)*nnz(P)/n + nnz(R)*nnz(Q)/n ≈ 2*nnz(A)*nnz(P)/n
-       * Uses nnz(Q) ≈ nnz(A) and nnz(R) = nnz(P) for R = P^T */
+      /* Galerkin RAP cost: exact scalar FMA via local index walks of the
+       * two SpGEMMs Q = A*P and A_H = R*Q. Q is not materialized here —
+       * its per-row nnz is recomputed symbolically for the second walk. */
       if (P_array[level] != NULL)
       {
-         /* Compute nnz from local CSR data (global num_nonzeros may not be set) */
          hypre_CSRMatrix *A_diag_rap = hypre_ParCSRMatrixDiag(A_array[level]);
-         hypre_CSRMatrix *A_offd_rap = hypre_ParCSRMatrixOffd(A_array[level]);
          hypre_CSRMatrix *P_diag_rap = hypre_ParCSRMatrixDiag(P_array[level]);
          hypre_CSRMatrix *P_offd_rap = hypre_ParCSRMatrixOffd(P_array[level]);
-         HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(A_diag_rap) +
-                                          hypre_CSRMatrixNumNonzeros(A_offd_rap));
-         HYPRE_Real nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(P_diag_rap) +
-                                          hypre_CSRMatrixNumNonzeros(P_offd_rap));
-         HYPRE_Real nnz_R = nnz_P;  /* Default for R = P^T */
-         if (restri_type && R_array[level] != NULL)
-         {
-            hypre_CSRMatrix *R_diag_rap = hypre_ParCSRMatrixDiag(R_array[level]);
-            hypre_CSRMatrix *R_offd_rap = hypre_ParCSRMatrixOffd(R_array[level]);
-            nnz_R = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(R_diag_rap) +
-                                  hypre_CSRMatrixNumNonzeros(R_offd_rap));
-         }
 
          /* R = P^T transpose construction: nnz(P) graph ops for CSR transpose */
+         HYPRE_Real nnz_P = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(P_diag_rap) +
+                                          hypre_CSRMatrixNumNonzeros(P_offd_rap));
          hypre_ParAMGDataSetupGraphOps(amg_data) += nnz_P;
 
-         HYPRE_BigInt n_rows = hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
          HYPRE_Real blk_mult = block_mode ? (HYPRE_Real)(num_functions * num_functions) : 1.0;
-         if (n_rows > 0)
+
+         /* Phase 1: Q = A_diag * P_diag.  Exact scalar FMA count via index walk. */
+         HYPRE_Real fma_AP = hypre_CSRMatrixSpMMFlopsHost(A_diag_rap, P_diag_rap);
+
+         /* Phase 2: A_H = R * Q.  Need Q's per-row nnz for an exact walk. */
+         HYPRE_Int *Q_row_nnz = hypre_CSRMatrixSpMMRowNnzHost(A_diag_rap, P_diag_rap);
+         HYPRE_Real fma_RQ = 0.0;
+         if (restri_type && R_array[level] != NULL)
          {
-            HYPRE_Real rap_cost = (nnz_A * nnz_P + nnz_R * nnz_A) / (HYPRE_Real) n_rows;
-            hypre_ParAMGDataSetupFlops(amg_data) += rap_cost * blk_mult;
-            hypre_ParAMGDataSetupGraphOps(amg_data) += rap_cost * blk_mult;
+            /* Explicit R: walk R_diag's column indices against Q_row_nnz. */
+            hypre_CSRMatrix *R_diag_rap = hypre_ParCSRMatrixDiag(R_array[level]);
+            HYPRE_Int       *R_i        = hypre_CSRMatrixI(R_diag_rap);
+            HYPRE_Int       *R_j        = hypre_CSRMatrixJ(R_diag_rap);
+            HYPRE_Int        n_R_rows   = hypre_CSRMatrixNumRows(R_diag_rap);
+            HYPRE_Int        i, jj;
+#ifdef HYPRE_USING_OPENMP
+            #pragma omp parallel for private(i, jj) reduction(+:fma_RQ) HYPRE_SMP_SCHEDULE
+#endif
+            for (i = 0; i < n_R_rows; i++)
+            {
+               HYPRE_Real row_total = 0.0;
+               for (jj = R_i[i]; jj < R_i[i + 1]; jj++)
+               {
+                  row_total += (HYPRE_Real) Q_row_nnz[R_j[jj]];
+               }
+               fma_RQ += row_total;
+            }
          }
+         else
+         {
+            /* Implicit R = P^T: spmm_work(P^T, Q) = sum_k Q_row_nnz[k] * nnz(P[k,:]). */
+            HYPRE_Int *P_i      = hypre_CSRMatrixI(P_diag_rap);
+            HYPRE_Int  n_P_rows = hypre_CSRMatrixNumRows(P_diag_rap);
+            HYPRE_Int  k;
+#ifdef HYPRE_USING_OPENMP
+            #pragma omp parallel for private(k) reduction(+:fma_RQ) HYPRE_SMP_SCHEDULE
+#endif
+            for (k = 0; k < n_P_rows; k++)
+            {
+               fma_RQ += (HYPRE_Real) Q_row_nnz[k] * (HYPRE_Real) (P_i[k + 1] - P_i[k]);
+            }
+         }
+         hypre_TFree(Q_row_nnz, HYPRE_MEMORY_HOST);
+
+         HYPRE_Real rap_cost = fma_AP + fma_RQ;
+         hypre_ParAMGDataSetupFlops(amg_data)    += rap_cost * blk_mult;
+         hypre_ParAMGDataSetupGraphOps(amg_data) += rap_cost * blk_mult;
       }
 
       HYPRE_ANNOTATE_REGION_END("%s", "RAP");

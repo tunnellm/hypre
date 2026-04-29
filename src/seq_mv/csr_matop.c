@@ -2492,3 +2492,120 @@ hypre_CSRMatrixTaggedFnorm(hypre_CSRMatrix  *A,
 
    return hypre_error_flag;
 }
+
+/*--------------------------------------------------------------------------
+ * hypre_CSRMatrixSpMMFlopsHost
+ *
+ * Exact scalar FMA count of CSR matrix-matrix product C = A*B, computed by
+ * walking the index arrays:
+ *
+ *   sum_{(i, ja) in A} (B->i[ja+1] - B->i[ja])
+ *
+ * Counterpart of pyamg's spmm_work — replaces the uniform-row-density
+ * approximation nnz(A)*nnz(B)/n with the exact triple-loop count of the
+ * row-wise (Gustavson) SpGEMM. O(nnz(A)) work; OpenMP-parallel over rows.
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Real
+hypre_CSRMatrixSpMMFlopsHost( hypre_CSRMatrix *A,
+                              hypre_CSRMatrix *B )
+{
+   HYPRE_Int   *A_i     = hypre_CSRMatrixI(A);
+   HYPRE_Int   *A_j     = hypre_CSRMatrixJ(A);
+   HYPRE_Int   *B_i     = hypre_CSRMatrixI(B);
+   HYPRE_Int    nrows_A = hypre_CSRMatrixNumRows(A);
+   HYPRE_Int    nnz_A   = hypre_CSRMatrixNumNonzeros(A);
+   HYPRE_Int    nnz_B   = hypre_CSRMatrixNumNonzeros(B);
+   HYPRE_Real   total   = 0.0;
+   HYPRE_Int    i, jj;
+
+   if (nnz_A == 0 || nnz_B == 0 || nrows_A == 0)
+   {
+      return 0.0;
+   }
+
+#ifdef HYPRE_USING_OPENMP
+   #pragma omp parallel for private(i, jj) reduction(+:total) HYPRE_SMP_SCHEDULE
+#endif
+   for (i = 0; i < nrows_A; i++)
+   {
+      HYPRE_Real row_total = 0.0;
+      for (jj = A_i[i]; jj < A_i[i + 1]; jj++)
+      {
+         HYPRE_Int j = A_j[jj];
+         row_total += (HYPRE_Real)(B_i[j + 1] - B_i[j]);
+      }
+      total += row_total;
+   }
+
+   return total;
+}
+
+/*--------------------------------------------------------------------------
+ * hypre_CSRMatrixSpMMRowNnzHost
+ *
+ * Returns nnz of each row of C = A*B (without materializing C's column
+ * indices or values). Caller frees the returned array via hypre_TFree(...,
+ * HYPRE_MEMORY_HOST).
+ *
+ * Used to walk a downstream matrix R against the symbolic pattern of
+ * Q = A*B for exact spmm_work(R, Q) accounting (e.g. Galerkin RAP, where Q
+ * is constructed and destroyed inside hypre_ParCSRMatrixRAPKTHost).
+ *--------------------------------------------------------------------------*/
+
+HYPRE_Int*
+hypre_CSRMatrixSpMMRowNnzHost( hypre_CSRMatrix *A,
+                               hypre_CSRMatrix *B )
+{
+   HYPRE_Int  *A_i     = hypre_CSRMatrixI(A);
+   HYPRE_Int  *A_j     = hypre_CSRMatrixJ(A);
+   HYPRE_Int  *B_i     = hypre_CSRMatrixI(B);
+   HYPRE_Int  *B_j     = hypre_CSRMatrixJ(B);
+   HYPRE_Int   nrows_A = hypre_CSRMatrixNumRows(A);
+   HYPRE_Int   ncols_B = hypre_CSRMatrixNumCols(B);
+   HYPRE_Int   nnz_A   = hypre_CSRMatrixNumNonzeros(A);
+   HYPRE_Int   nnz_B   = hypre_CSRMatrixNumNonzeros(B);
+
+   HYPRE_Int  *row_nnz = hypre_CTAlloc(HYPRE_Int, nrows_A, HYPRE_MEMORY_HOST);
+
+   if (nnz_A == 0 || nnz_B == 0 || nrows_A == 0)
+   {
+      return row_nnz;
+   }
+
+#ifdef HYPRE_USING_OPENMP
+   #pragma omp parallel
+#endif
+   {
+      HYPRE_Int *marker = hypre_CTAlloc(HYPRE_Int, ncols_B, HYPRE_MEMORY_HOST);
+      HYPRE_Int  ic, ia, ib, ja, jb;
+
+      for (ib = 0; ib < ncols_B; ib++) { marker[ib] = -1; }
+
+#ifdef HYPRE_USING_OPENMP
+      #pragma omp for HYPRE_SMP_SCHEDULE
+#endif
+      for (ic = 0; ic < nrows_A; ic++)
+      {
+         HYPRE_Int row_count = 0;
+         for (ia = A_i[ic]; ia < A_i[ic + 1]; ia++)
+         {
+            ja = A_j[ia];
+            for (ib = B_i[ja]; ib < B_i[ja + 1]; ib++)
+            {
+               jb = B_j[ib];
+               if (marker[jb] != ic)
+               {
+                  marker[jb] = ic;
+                  row_count++;
+               }
+            }
+         }
+         row_nnz[ic] = row_count;
+      }
+
+      hypre_TFree(marker, HYPRE_MEMORY_HOST);
+   }
+
+   return row_nnz;
+}
