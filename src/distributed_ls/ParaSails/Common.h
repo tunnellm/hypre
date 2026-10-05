@@ -13,6 +13,7 @@
  *****************************************************************************/
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #if 1 /* HYPRE */
 #include "HYPRE_config.h"
@@ -41,11 +42,14 @@
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #endif
 
+/* The sequential MPI_Abort stub returns. Never resume after a fatal error,
+ * and avoid host-runtime exit handlers when called from an embedded library. */
 #define PARASAILS_EXIT              \
 {                                   \
    hypre_fprintf(stderr, "Exiting...\n"); \
    fflush(NULL);                    \
    hypre_MPI_Abort(hypre_MPI_COMM_WORLD, -1);   \
+   _Exit(EXIT_FAILURE);             \
 }
 
 #endif /* _COMMON_H */
