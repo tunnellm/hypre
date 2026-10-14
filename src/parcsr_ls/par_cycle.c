@@ -12,6 +12,7 @@
  *****************************************************************************/
 
 #include "_hypre_parcsr_ls.h"
+#include "cheby_work.h"
 #include "par_amg.h"
 #include "_hypre_parcsr_block_mv.h"
 
@@ -449,8 +450,8 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                    * With scaling: 3n FMAs (scale, axpy, axpy). Without: n FMAs (axpy). */
                   HYPRE_Int cheby_scale = hypre_ParAMGDataChebyScale(amg_data);
                   HYPRE_Real n_global = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[level]);
-                  cycle_op_count += cheby_order * (num_coeffs[level]
-                     + (cheby_scale ? 3.0 : 1.0) * n_global);
+                  cycle_op_count += hypre_ChebyApplyWork(cheby_order, cheby_scale,
+                     hypre_ParAMGDataChebyVariant(amg_data), num_coeffs[level], n_global);
                }
                else if (relax_type == 6  || relax_type == 8  ||
                         relax_type == 21 || relax_type == 88 ||

@@ -363,7 +363,7 @@ hypre_ParChebySetEigRatio( hypre_ParChebyData  *cheby_data,
       return hypre_error_flag;
    }
 
-   if (eig_ratio <= 0.0 || eig_ratio > 1.0 )
+   if (!(eig_ratio >= 0.0 && eig_ratio <= 1.0))
    {
       hypre_error_in_arg(2);
       return hypre_error_flag;

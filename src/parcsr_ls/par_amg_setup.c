@@ -7,6 +7,7 @@
 
 #include "_hypre_onedpl.hpp"
 #include "_hypre_parcsr_ls.h"
+#include "cheby_work.h"
 #include "par_amg.h"
 #include "_hypre_parcsr_block_mv.h"
 #include "_hypre_utilities.hpp"
@@ -5137,6 +5138,8 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 
          /* Accumulate Chebyshev setup FLOPs and graph ops */
          {
+            hypre_ParAMGDataSetupFlops(amg_data) +=
+               hypre_ChebyRecurrenceSetupWork(cheby_order, variant);
             HYPRE_Real nnz_A = (HYPRE_Real) (hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixDiag(A_array[j])) +
                                              hypre_CSRMatrixNumNonzeros(hypre_ParCSRMatrixOffd(A_array[j])));
             HYPRE_Real n_rows = (HYPRE_Real) hypre_ParCSRMatrixGlobalNumRows(A_array[j]);

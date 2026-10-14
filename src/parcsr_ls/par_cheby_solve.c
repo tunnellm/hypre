@@ -187,6 +187,65 @@ hypre_ParChebySolve( hypre_ParChebyData *cheby_data,
 }
 
 /*--------------------------------------------------------------------------
+ * Higher-degree host extension. Reuse the existing work vectors; no storage
+ * grows with degree other than the setup's scalar coefficient pairs.
+ *--------------------------------------------------------------------------*/
+
+static HYPRE_Int
+hypre_ParCSRRelax_Cheby_SemiIterate(hypre_ParCSRMatrix *A, hypre_ParVector *f,
+                                  HYPRE_Real *ds, HYPRE_Real *coefs,
+                                  HYPRE_Int order, HYPRE_Int scale, HYPRE_Int variant,
+                                  hypre_ParVector *u, hypre_ParVector *p,
+                                  hypre_ParVector *r, hypre_ParVector *Ap,
+                                  hypre_ParVector *tmp)
+{
+   HYPRE_Int i, k, n = hypre_ParCSRMatrixNumRows(A);
+   HYPRE_Real *ud = hypre_ParVectorLocalData(u);
+   HYPRE_Real *fd = hypre_ParVectorLocalData(f);
+   HYPRE_Real *pd = hypre_ParVectorLocalData(p);
+   HYPRE_Real *rd = hypre_ParVectorLocalData(r);
+   HYPRE_Real *ad = hypre_ParVectorLocalData(Ap);
+   HYPRE_Real *td = scale ? hypre_ParVectorLocalData(tmp) : NULL;
+   HYPRE_Real alpha = coefs[0];
+
+   /* r = D*(f-A*u), where D=I without diagonal scaling. */
+   hypre_ParCSRMatrixMatvec(-1.0, A, u, 0.0, Ap);
+#ifdef HYPRE_USING_OPENMP
+   #pragma omp parallel for private(i) HYPRE_SMP_SCHEDULE
+#endif
+   for (i = 0; i < n; i++)
+   {
+      rd[i] = scale ? ds[i] * (fd[i] + ad[i]) : fd[i] + ad[i];
+      pd[i] = alpha * rd[i];
+      ud[i] += scale ? ds[i] * pd[i] : pd[i];
+   }
+   for (k = 1; k < order; k++)
+   {
+      HYPRE_Real beta = coefs[2 * (size_t) k + 1];
+      HYPRE_Int richardson = variant == 1 && k == order - 1;
+      alpha = coefs[2 * (size_t) k];
+      if (scale)
+      {
+#ifdef HYPRE_USING_OPENMP
+         #pragma omp parallel for private(i) HYPRE_SMP_SCHEDULE
+#endif
+         for (i = 0; i < n; i++) { td[i] = ds[i] * pd[i]; }
+      }
+      hypre_ParCSRMatrixMatvec(1.0, A, scale ? tmp : p, 0.0, Ap);
+#ifdef HYPRE_USING_OPENMP
+      #pragma omp parallel for private(i) HYPRE_SMP_SCHEDULE
+#endif
+      for (i = 0; i < n; i++)
+      {
+         rd[i] -= scale ? ds[i] * ad[i] : ad[i];
+         pd[i] = richardson ? alpha * rd[i] : alpha * rd[i] + beta * pd[i];
+         ud[i] += scale ? ds[i] * pd[i] : pd[i];
+      }
+   }
+   return hypre_error_flag;
+}
+
+/*--------------------------------------------------------------------------
  * Legacy function for applying the chebyshev polynomial on the host
  *--------------------------------------------------------------------------*/
 
@@ -204,8 +263,6 @@ hypre_ParCSRRelax_Cheby_SolveHost(hypre_ParCSRMatrix *A,
                                   hypre_ParVector    *orig_u_vec,
                                   hypre_ParVector    *tmp_vec)
 {
-   HYPRE_UNUSED_VAR(variant);
-
    hypre_CSRMatrix *A_diag   = hypre_ParCSRMatrixDiag(A);
    HYPRE_Real      *u_data   = hypre_ParVectorLocalData(u);
    HYPRE_Real      *f_data   = hypre_ParVectorLocalData(f);
@@ -222,7 +279,9 @@ hypre_ParCSRRelax_Cheby_SolveHost(hypre_ParCSRMatrix *A,
    /* u = u + p(A) r */
    if (order > 4)
    {
-      order = 4;
+      return hypre_ParCSRRelax_Cheby_SemiIterate(A, f, ds_data, coefs, order,
+                                               scale, variant, u, v, r,
+                                               orig_u_vec, tmp_vec);
    }
    if (order < 1)
    {

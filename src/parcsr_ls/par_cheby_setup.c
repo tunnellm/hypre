@@ -6,6 +6,7 @@
  ******************************************************************************/
 
 #include "_hypre_parcsr_ls.h"
+#include "cheby_work.h"
 
 /*--------------------------------------------------------------------------
  * Setup Chebyshev solver/relaxation
@@ -144,17 +145,10 @@ hypre_ParChebySetup( hypre_ParChebyData *cheby_data,
          hypre_ParChebyDataSetupGraphOps(cheby_data) += 2.0 * n_real;
       }
 
-      /* Apply FLOPs per call: order iterations of matvec + vector ops */
-      if (scale)
-      {
-         /* With scaling: matvec + 3 vector ops per iteration */
-         hypre_ParChebyDataApplyFlops(cheby_data) = (HYPRE_Real) order * (nnz_real + 3.0 * n_real);
-      }
-      else
-      {
-         /* No scaling: matvec + 1 vector op per iteration */
-         hypre_ParChebyDataApplyFlops(cheby_data) = (HYPRE_Real) order * (nnz_real + n_real);
-      }
+      hypre_ParChebyDataApplyFlops(cheby_data) =
+         hypre_ChebyApplyWork(order, scale, variant, nnz_real, n_real);
+      hypre_ParChebyDataSetupFlops(cheby_data) +=
+         hypre_ChebyRecurrenceSetupWork(order, variant);
    }
 
    HYPRE_ANNOTATE_FUNC_END;
@@ -171,10 +165,10 @@ hypre_ParChebySetup( hypre_ParChebyData *cheby_data,
  * - max_eig: Maximum eigenvalue
  * - min_eig: Minimum eigenvalue
  * - eig_ratio: Fraction used to calculate lower bound
- * - order: Polynomial order to use [1,4]
+ * - order: Polynomial order (upstream uses [1,4]; this fork extends the host path)
  * - scale: Whether or not to scale by the diagonal
  * - variant: Chebyshev variant (0 standard, 1 variant)
- * - coefs_ptr: output polynomial coefficients
+ * - coefs_ptr: monomial coefficients for order <= 4; (alpha,beta) pairs otherwise
  * - ds_ptr: output diagonal scaling
  *--------------------------------------------------------------------------*/
 
@@ -199,18 +193,23 @@ hypre_ParCSRRelax_Cheby_Setup(hypre_ParCSRMatrix *A,
    HYPRE_Real            *ds_data = NULL;
 
    /* u = u + p(A)r */
-   if (order > 4)
-   {
-      order = 4;
-   }
-
    if (order < 1)
    {
       order = 1;
    }
 
+#if defined(HYPRE_USING_GPU)
+   if (order > 4 && hypre_GetExecPolicy1(memory_location) == HYPRE_EXEC_DEVICE)
+   {
+      hypre_error_w_msg(HYPRE_ERROR_GENERIC,
+                        "Chebyshev degree > 4 requires the host implementation");
+      return hypre_error_flag;
+   }
+#endif
+
    /* Allocate coefficients */
-   coefs = hypre_CTAlloc(HYPRE_Real, order + 1, HYPRE_MEMORY_HOST);
+   coefs = hypre_CTAlloc(HYPRE_Real, order > 4 ? 2 * (size_t) order : (size_t) order + 1,
+                        HYPRE_MEMORY_HOST);
 
    /* we are using the order of p(A) */
    cheby_order = order - 1;
@@ -233,7 +232,49 @@ hypre_ParCSRRelax_Cheby_Setup(hypre_ParCSRMatrix *A,
    theta = (upper_bound + lower_bound) / 2;
    delta = (upper_bound - lower_bound) / 2;
 
-   if (variant == 1)
+   if (order > 4)
+   {
+      /* Avoid high-degree monomial/Horner cancellation. These coefficients
+       * generate p_k = alpha_k*r_{k-1} + beta_k*p_{k-1}. The residual
+       * polynomial is T_k((theta-t)/delta)/T_k(theta/delta).
+       * Variant 1 uses degree k-1 followed by (1-t/upper_bound), matching
+       * the existing low-order formulas (except their special order-1 case). */
+      HYPRE_Int k;
+      HYPRE_Real half_delta = 0.5 * delta;
+      HYPRE_Real gamma = half_delta * half_delta;
+      HYPRE_Real alpha = 1.0 / theta;
+      coefs[0] = alpha;
+      coefs[1] = 0.0;
+      for (k = 1; k < order; k++)
+      {
+         HYPRE_Real beta;
+         if (variant == 1 && k == order - 1)
+         {
+            alpha = 1.0 / upper_bound;
+            beta = 0.0;
+         }
+         else
+         {
+            HYPRE_Real previous = gamma * alpha;
+            if (k == 1) { previous *= 2.0; }
+            alpha = 1.0 / (theta - previous);
+            beta = alpha * previous;
+         }
+         coefs[2 * (size_t) k] = alpha;
+         coefs[2 * (size_t) k + 1] = beta;
+      }
+      for (k = 0; k < order; k++)
+      {
+         if (!(hypre_abs(coefs[2 * (size_t) k]) <= HYPRE_REAL_MAX) ||
+             !(hypre_abs(coefs[2 * (size_t) k + 1]) <= HYPRE_REAL_MAX))
+         {
+            hypre_TFree(coefs, HYPRE_MEMORY_HOST);
+            hypre_error_w_msg(HYPRE_ERROR_GENERIC, "Nonfinite high-order Chebyshev coefficients");
+            return hypre_error_flag;
+         }
+      }
+   }
+   else if (variant == 1)
    {
       /* These are the corresponding cheby polynomials: u = u_o + s(A) r_0
          So order is one less than  resid poly: r(t) = 1 - t*s(t) */

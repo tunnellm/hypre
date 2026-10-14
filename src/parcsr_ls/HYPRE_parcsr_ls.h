@@ -2111,7 +2111,9 @@ HYPRE_Int HYPRE_ParChebySetLogging( HYPRE_Solver solver,
 
 /**
  * (Optional) Defines the Order for Chebyshev smoother.
- *  The default is 2 (valid options are 1-4).
+ *  The default is 2. Upstream supports orders 1-4; this fork also supports
+ *  higher positive orders on the host using Chebyshev semi-iteration.
+ *  Device execution rejects orders above 4.
  **/
 HYPRE_Int HYPRE_ParChebySetOrder( HYPRE_Solver solver,
                                   HYPRE_Int    order );
@@ -2131,8 +2133,10 @@ HYPRE_Int HYPRE_ParChebySetScale( HYPRE_Solver solver,
                                   HYPRE_Int    scale );
 
 /**
- * (Optional) Fraction of the spectrum to use for the Chebyshev smoother.
- *  The default is .3 (i.e., damp on upper 30% of the spectrum).
+ * (Optional) Interpolation fraction for the lower polynomial endpoint.
+ *  The default is .3. This fork accepts values in [0, 1], including zero
+ *  to retain the supplied lower eigenvalue estimate. For positive bounds,
+ *  lower = min_eig + eig_ratio * (1.1 * max_eig - min_eig).
  **/
 HYPRE_Int HYPRE_ParChebySetEigRatio( HYPRE_Solver solver,
                                      HYPRE_Real   eig_ratio );

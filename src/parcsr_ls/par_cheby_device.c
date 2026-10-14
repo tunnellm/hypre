@@ -144,11 +144,18 @@ hypre_ParCSRRelax_Cheby_SolveDevice(hypre_ParCSRMatrix *A, /* matrix to relax wi
    HYPRE_Int        cheby_order;
    HYPRE_Real      *tmp_data;
 
+   /* Higher-degree coefficient pairs are currently a host-only extension. */
+   if (order > 4)
+   {
+      hypre_error_w_msg(HYPRE_ERROR_GENERIC,
+                        "Chebyshev degree > 4 requires the host implementation");
+      return hypre_error_flag;
+   }
+
    hypre_GpuProfilingPushRange("ParCSRRelaxChebySolve");
 
    /* u = u + p(A)r */
 
-   if (order > 4) { order = 4; }
    if (order < 1) { order = 1; }
 
    /* we are using the order of p(A) */

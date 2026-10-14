@@ -12,6 +12,7 @@
  *****************************************************************************/
 
 #include "_hypre_parcsr_ls.h"
+#include "cheby_work.h"
 #include "par_amg.h"
 
 /*--------------------------------------------------------------------------
@@ -246,8 +247,8 @@ hypre_BoomerAMGAdditiveCycle( void              *amg_vdata)
             {
                HYPRE_Int cheby_order = hypre_ParAMGDataChebyOrder(amg_data);
                HYPRE_Int cheby_scale = hypre_ParAMGDataChebyScale(amg_data);
-               down_cost = (HYPRE_Real) cheby_order *
-                  (nnz_A + (cheby_scale ? 3.0 : 1.0) * n_fine);
+               down_cost = hypre_ChebyApplyWork(cheby_order, cheby_scale,
+                  hypre_ParAMGDataChebyVariant(amg_data), nnz_A, n_fine);
             }
             else if (rlx_down == 9  || rlx_down == 19  || rlx_down == 98 ||
                      rlx_down == 99 || rlx_down == 198 || rlx_down == 199)
@@ -381,8 +382,8 @@ hypre_BoomerAMGAdditiveCycle( void              *amg_vdata)
          {
             HYPRE_Int cheby_order = hypre_ParAMGDataChebyOrder(amg_data);
             HYPRE_Int cheby_scale = hypre_ParAMGDataChebyScale(amg_data);
-            coarse_cost = (HYPRE_Real) cheby_order *
-               (nnz_A_coarse + (cheby_scale ? 3.0 : 1.0) * n_coarse);
+            coarse_cost = hypre_ChebyApplyWork(cheby_order, cheby_scale,
+               hypre_ParAMGDataChebyVariant(amg_data), nnz_A_coarse, n_coarse);
          }
          else if (rlx_coarse == 17)
          {
@@ -507,8 +508,8 @@ hypre_BoomerAMGAdditiveCycle( void              *amg_vdata)
             {
                HYPRE_Int cheby_order = hypre_ParAMGDataChebyOrder(amg_data);
                HYPRE_Int cheby_scale = hypre_ParAMGDataChebyScale(amg_data);
-               up_cost = (HYPRE_Real) cheby_order *
-                  (nnz_A + (cheby_scale ? 3.0 : 1.0) * n_fine);
+               up_cost = hypre_ChebyApplyWork(cheby_order, cheby_scale,
+                  hypre_ParAMGDataChebyVariant(amg_data), nnz_A, n_fine);
             }
             else if (rlx_up == 9  || rlx_up == 19  || rlx_up == 98 ||
                      rlx_up == 99 || rlx_up == 198 || rlx_up == 199)
