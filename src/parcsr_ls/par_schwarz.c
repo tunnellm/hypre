@@ -125,6 +125,13 @@ hypre_SchwarzSetup(void               *schwarz_vdata,
    HYPRE_Real relax_weight = hypre_SchwarzDataRelaxWeight(schwarz_data);
    HYPRE_Int use_nonsymm = hypre_SchwarzDataUseNonSymm(schwarz_data);
 
+   if (schwarz_data->symmetric &&
+       ((variant != 1 && variant != 2) || use_nonsymm || !(relax_weight > 0.0)))
+   {
+      hypre_error_w_msg(HYPRE_ERROR_ARG,
+                       "Symmetric additive Schwarz requires variant 1/2, SPD local solves, and positive weight");
+      return hypre_error_flag;
+   }
 
    dof_func = hypre_SchwarzDataDofFunc(schwarz_data);
 
@@ -184,6 +191,20 @@ hypre_SchwarzSetup(void               *schwarz_vdata,
 
    hypre_SchwarzDataDomainStructure(schwarz_data) = domain_structure;
    hypre_SchwarzDataPivots(schwarz_data) = pivots;
+
+   if (domain_structure && (variant == 1 || variant == 2))
+   {
+      HYPRE_Int i;
+      schwarz_data->scale_size = hypre_CSRMatrixNumRows(hypre_ParCSRMatrixDiag(A));
+      if (schwarz_data->symmetric)
+      {
+         /* A common scalar preserves symmetry; row-dependent averaging does not. */
+         for (i = 0; i < schwarz_data->scale_size; i++)
+         {
+            hypre_SchwarzDataScale(schwarz_data)[i] = relax_weight;
+         }
+      }
+   }
 
    /* Compute FLOP, graph op, and apply cost for Schwarz.
     * These are the authoritative values; AMG setup reads them when
@@ -459,8 +480,43 @@ hypre_SchwarzSetRelaxWeight( void *data, HYPRE_Real relax_weight )
 
    hypre_SchwarzData  *schwarz_data = (hypre_SchwarzData*) data;
 
+   if (schwarz_data->symmetric && !(relax_weight > 0.0))
+   {
+      hypre_error_in_arg(2);
+      return hypre_error_flag;
+   }
+   if (schwarz_data->scale_size > 0 &&
+       relax_weight != hypre_SchwarzDataRelaxWeight(schwarz_data))
+   {
+      HYPRE_Int i;
+      HYPRE_Real old_weight = hypre_SchwarzDataRelaxWeight(schwarz_data);
+      if (old_weight == 0.0)
+      {
+         hypre_error_w_msg(HYPRE_ERROR_ARG, "Cannot rescale zero-weight Schwarz after setup");
+         return hypre_error_flag;
+      }
+      HYPRE_Real ratio = relax_weight / old_weight;
+      for (i = 0; i < schwarz_data->scale_size; i++)
+      {
+         hypre_SchwarzDataScale(schwarz_data)[i] *= ratio;
+      }
+      hypre_SchwarzDataSetupFlops(schwarz_data) += schwarz_data->scale_size + 1.0;
+   }
    hypre_SchwarzDataRelaxWeight(schwarz_data) = relax_weight;
 
+   return hypre_error_flag;
+}
+
+HYPRE_Int
+hypre_SchwarzSetSymmetric(void *data, HYPRE_Int symmetric)
+{
+   hypre_SchwarzData *schwarz_data = (hypre_SchwarzData *) data;
+   if ((symmetric != 0 && symmetric != 1) || hypre_SchwarzDataDomainStructure(schwarz_data))
+   {
+      hypre_error_w_msg(HYPRE_ERROR_ARG, "Schwarz symmetric flag must be 0/1 and set before setup");
+      return hypre_error_flag;
+   }
+   schwarz_data->symmetric = symmetric;
    return hypre_error_flag;
 }
 
@@ -566,6 +622,7 @@ hypre_SchwarzGetMaxDomainOverlap( void *data, HYPRE_Int *max_overlap )
    HYPRE_Int  nnz         = I[num_domains];
 
    HYPRE_Int *count = hypre_CTAlloc(HYPRE_Int, num_dofs, HYPRE_MEMORY_HOST);
+
    HYPRE_Int  k, max_val = 0;
 
    for (k = 0; k < nnz; k++)

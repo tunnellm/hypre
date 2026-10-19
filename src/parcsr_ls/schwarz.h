@@ -19,6 +19,8 @@ typedef struct
    HYPRE_Int      overlap;
    HYPRE_Int      num_functions;
    HYPRE_Int      use_nonsymm;
+   HYPRE_Int      symmetric;
+   HYPRE_Int      scale_size;
    HYPRE_Real   relax_weight;
 
    hypre_CSRMatrix *domain_structure;

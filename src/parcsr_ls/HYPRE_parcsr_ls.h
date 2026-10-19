@@ -4303,6 +4303,14 @@ HYPRE_Int HYPRE_SchwarzSetDomainType(HYPRE_Solver solver,
 HYPRE_Int HYPRE_SchwarzSetRelaxWeight(HYPRE_Solver solver,
                                       HYPRE_Real   relax_weight);
 
+/** Enable scalar-weighted symmetric additive Schwarz (variants 1 and 2).
+ * Set before Setup. Default 0 retains legacy one-sided overlap averaging.
+ * With SPD subdomain solves and a positive scalar relaxation weight, mode 1
+ * applies omega * sum_i R_i^T A_i^{-1} R_i, without row-dependent weighting.
+ * This flag does not make nonsymmetric local solves symmetric.
+ */
+HYPRE_Int HYPRE_SchwarzSetSymmetric(HYPRE_Solver solver, HYPRE_Int symmetric);
+
 HYPRE_Int HYPRE_SchwarzSetDomainStructure(HYPRE_Solver    solver,
                                           HYPRE_CSRMatrix domain_structure);
 

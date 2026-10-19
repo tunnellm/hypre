@@ -2747,6 +2747,8 @@ HYPRE_Int hypre_SchwarzSetOverlap ( void *data, HYPRE_Int overlap );
 HYPRE_Int hypre_SchwarzSetNumFunctions ( void *data, HYPRE_Int num_functions );
 HYPRE_Int hypre_SchwarzSetNonSymm ( void *data, HYPRE_Int value );
 HYPRE_Int hypre_SchwarzSetRelaxWeight ( void *data, HYPRE_Real relax_weight );
+HYPRE_Int hypre_SchwarzSetSymmetric ( void *data, HYPRE_Int symmetric );
+HYPRE_Int hypre_SchwarzGetMaxDomainOverlap ( void *data, HYPRE_Int *max_overlap );
 HYPRE_Int hypre_SchwarzSetDomainStructure ( void *data, hypre_CSRMatrix *domain_structure );
 HYPRE_Int hypre_SchwarzSetScale ( void *data, HYPRE_Real *scale );
 HYPRE_Int hypre_SchwarzReScale ( void *data, HYPRE_Int size, HYPRE_Real value );

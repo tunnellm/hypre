@@ -144,6 +144,12 @@ HYPRE_SchwarzSetRelaxWeight( HYPRE_Solver  solver,
    return ( hypre_SchwarzSetRelaxWeight((void *) solver, relax_weight));
 }
 
+HYPRE_Int
+HYPRE_SchwarzSetSymmetric(HYPRE_Solver solver, HYPRE_Int symmetric)
+{
+   return hypre_SchwarzSetSymmetric((void *) solver, symmetric);
+}
+
 /*--------------------------------------------------------------------------
  * HYPRE_SchwarzSetDofFunc
  *--------------------------------------------------------------------------*/
