@@ -5342,8 +5342,10 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
 
             /* Store FSAI solve flops: 2 * nnz(G) for G*x and G^T*y */
             hypre_ParCSRMatrix *Gmat = hypre_ParFSAIDataGmat(fsai_d);
+            /* FSAI setup does not necessarily populate the global nnz fields. */
+            hypre_ParCSRMatrixSetDNumNonzeros(Gmat);
             hypre_ParAMGDataSmootherSolveFlops(amg_data)[j] =
-               2.0 * (HYPRE_Real) hypre_ParCSRMatrixNumNonzeros(Gmat);
+               2.0 * hypre_ParCSRMatrixDNumNonzeros(Gmat);
          }
 
 #if DEBUG_SAVE_ALL_OPS

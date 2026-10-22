@@ -72,6 +72,7 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
    HYPRE_Int       i, j, jj;
    HYPRE_Int       level;
    HYPRE_Int       cycle_param;
+   HYPRE_Int       turnaround_down = 0;
    HYPRE_Int       coarse_grid;
    HYPRE_Int       fine_grid;
    HYPRE_Int       Not_Finished;
@@ -196,7 +197,7 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
     *
     *     Cycling is controlled using a level counter: lev_counter[k]
     *
-    *     Each time relaxation is performed on level k, the
+    *     Each time a scheduled visit completes on level k, the
     *     counter is decremented by 1. If the counter is then
     *     negative, we go to the next finer level. If non-
     *     negative, we go to the next coarser level. The
@@ -207,6 +208,9 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
     *
     *     c. During cycling, when going down to level k, lev_counter[k]
     *        is set to the max of (lev_counter[k],cycle_type)
+    *     d. Full W cycles finish an up phase and start a new down phase
+    *        before revisiting a child. These two phases consume one counter
+    *        decrement, and both use the normal smoothing/work dispatch.
     *---------------------------------------------------------------------*/
 
    Not_Finished = 1;
@@ -421,8 +425,21 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                     smooth_type == 6 || smooth_type == 16 ||
                     smooth_type == 8 || smooth_type == 18))
                {
-                  /* Use precomputed solve flops for FSAI (4), ILU (5, 15), Schwarz (6, 16), ParaSails (8, 18) */
-                  cycle_op_count += smoother_solve_flops[level];
+                  if (smooth_type == 4)
+                  {
+                     /* FSAISolve performs the phase's Richardson iterations per
+                      * call. Only a fresh down phase omits the first residual;
+                      * post-smoothing and repeated down phases retain u. */
+                     HYPRE_Int fsai_iters = num_grid_sweeps[cycle_param];
+                     HYPRE_Int residuals = hypre_max(0, fsai_iters - (cycle_param == 1 && !turnaround_down));
+                     cycle_op_count += fsai_iters * smoother_solve_flops[level]
+                                       + residuals * num_coeffs[level];
+                  }
+                  else
+                  {
+                     /* ILU (5,15), Schwarz (6,16), ParaSails (8,18). */
+                     cycle_op_count += smoother_solve_flops[level];
+                  }
                }
                else if (old_version && level < num_levels - 1)
                {
@@ -531,7 +548,8 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
                }
                else if ( smooth_num_levels > level && (smooth_type == 4) )
                {
-                  HYPRE_FSAISetZeroGuess(smoother[level], cycle_param - 2);
+                  /* A repeated down phase must retain the preceding correction. */
+                  HYPRE_FSAISetZeroGuess(smoother[level], turnaround_down ? 0 : cycle_param - 2);
                   HYPRE_FSAISetMaxIterations(smoother[level], num_grid_sweeps[cycle_param]);
                   HYPRE_FSAISolve(smoother[level],
                                   (HYPRE_ParCSRMatrix) A_array[level],
@@ -711,6 +729,19 @@ hypre_BoomerAMGCycle( void              *amg_vdata,
          HYPRE_ANNOTATE_REGION_END("%s", "Relaxation");
          hypre_GpuProfilingPopRange();
       }
+
+      /* Complete the next child cycle's pre-smoothing at an up-to-down turn.
+       * Re-enter the ordinary dispatch so all configured sweeps and their work
+       * are included. Decrement only after this down phase, not after both.
+       * Partial cycles and the unsupported F+V traversal retain their behavior. */
+      if (cycle_type == 2 && partial_cycle_coarsest_level < 0 &&
+          cycle_param == 2 && level != num_levels - 1 && lev_counter[level] > 0)
+      {
+         cycle_param = 1;
+         turnaround_down = 1;
+         continue;
+      }
+      turnaround_down = 0;
 
       /*------------------------------------------------------------------
        * Decrement the control counter and determine which grid to visit next

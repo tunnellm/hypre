@@ -24,6 +24,7 @@ set(TEST_SRCS
   struct_migrate.c
   ij_assembly.c
   unit/test_l1_gs_damping.c
+  unit/test_w_cycle.c
 )
 
 # Collect targets derived from source file names
@@ -51,6 +52,7 @@ endif()
 # Build each executable
 add_hypre_executables("${TEST_SRCS}")
 add_test(NAME test_l1_gs_damping COMMAND $<TARGET_FILE:test_l1_gs_damping>)
+add_test(NAME test_w_cycle COMMAND $<TARGET_FILE:test_w_cycle>)
 
 # Special treatment for sstructmat as it depends on sstruct_helpers (not an executable)
 add_hypre_executable("sstructmat.c" "sstruct_helpers.c")
@@ -75,13 +77,14 @@ set_property(GLOBAL PROPERTY ALLOW_DUPLICATE_CUSTOM_TARGETS TRUE)
 add_custom_target(check
   COMMAND ${CMAKE_COMMAND} -E echo "Checking the library..."
   COMMAND $<TARGET_FILE:test_l1_gs_damping>
+  COMMAND $<TARGET_FILE:test_w_cycle>
   COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:ij> 2> ij.err
   COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:struct> 2> struct.err
   COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:sstruct> 2> sstruct.err
   COMMAND ${CMAKE_COMMAND} -E echo "Test error files:"
   COMMAND ${CMAKE_COMMAND} -E cat ij.err struct.err sstruct.err
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-  DEPENDS ij struct sstruct test_l1_gs_damping
+  DEPENDS ij struct sstruct test_l1_gs_damping test_w_cycle
   COMMENT "Running basic library check"
   VERBATIM
 )
