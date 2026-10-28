@@ -2310,3 +2310,21 @@ HYPRE_BoomerAMGGetApplyFlops( HYPRE_Solver  solver,
 {
    return ( hypre_BoomerAMGGetSolveFlops( (void *) solver, apply_flops ) );
 }
+
+HYPRE_Int
+HYPRE_BoomerAMGGetNumLevels( HYPRE_Solver solver, HYPRE_Int *num_levels )
+{
+   hypre_ParAMGData *data = (hypre_ParAMGData *) solver;
+   if (!data)
+   {
+      hypre_error_in_arg(1);
+      return hypre_error_flag;
+   }
+   if (!num_levels)
+   {
+      hypre_error_in_arg(2);
+      return hypre_error_flag;
+   }
+   *num_levels = hypre_ParAMGDataNumLevels(data);
+   return hypre_error_flag;
+}

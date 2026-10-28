@@ -201,6 +201,10 @@ HYPRE_Int HYPRE_BoomerAMGGetSetupGraphOps(HYPRE_Solver  solver,
 HYPRE_Int HYPRE_BoomerAMGGetApplyFlops(HYPRE_Solver  solver,
                                         HYPRE_Real   *apply_flops);
 
+/** Returns the actual number of hierarchy levels after successful Setup. */
+HYPRE_Int HYPRE_BoomerAMGGetNumLevels(HYPRE_Solver solver,
+                                   HYPRE_Int *num_levels);
+
 /**
  * Returns the norm of the final relative residual.
  **/

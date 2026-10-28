@@ -5187,6 +5187,10 @@ hypre_BoomerAMGSetup( void               *amg_vdata,
                               (HYPRE_ParVector) U_array[j]);
       }
 
+      /* Retain eager estimation even when the current smoother ignores this
+       * weight (e.g. Chebyshev). Switching later to Jacobi/SOR without another
+       * Setup can consume it; skipping estimation would leave a zero weight
+       * and silently suppress those relaxation updates. */
       if (relax_weight[j] == 0.0)
       {
          hypre_ParCSRMatrixScaledNorm(A_array[j], &relax_weight[j]);
